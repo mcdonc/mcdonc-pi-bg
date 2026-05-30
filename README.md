@@ -1,6 +1,8 @@
 # mcdonc-pi-bg — Background Jobs for Pi
 
-A [pi coding agent](https://github.com/earendil-works/pi-coding-agent) extension that enables backgrounding tasks (like claude-code's ctrl-b), with job management, real-time output tailing, and keyboard shortcuts.
+A [pi coding agent](https://github.com/earendil-works/pi-coding-agent) extension that enables backgrounding tasks, with job management, real-time output tailing, and keyboard shortcuts.
+
+When you press `ctrl+b` during a running bash command, the command is detached (not killed and restarted) and continues running in the background. The pi main loop is freed for new prompts.
 
 ## Install
 
@@ -24,54 +26,85 @@ git clone https://github.com/mcdonc/mcdonc-pi-bg.git ~/.pi/agent/packages/mcdonc
 
 Then `/reload` inside pi.
 
-> **Note**: `index.ts` imports `./lib.ts`, so copying `index.ts` alone is not sufficient.
+> **Note**: The extension requires `index.ts`, `lib.ts`, and `wrapper.ts`. Copying `index.ts` alone is not sufficient.
+
+## Development
+
+Uses [devenv](https://devenv.sh/) for development environment. Run `devenv shell` to enter the environment (installs Node.js and npm dependencies automatically).
+
+```sh
+tests        # run the test suite
+runpi        # launch pi with the extension loaded
+```
+
+## How it works
+
+Every bash command pi executes is wrapped via a `spawnHook` through `wrapper.ts`. The wrapper:
+
+1. Runs the actual command under `setsid` (new process session/group) with stdout/stderr redirected to a `.out` file
+2. Tails the output file and forwards to pi's stdout so pi sees output normally
+3. Listens on a FIFO (named pipe) for a "detach" message
+4. On detach: wrapper exits cleanly, inner command keeps running and writing to the file
+5. On normal exit: wrapper cleans up all temp files and propagates the exit code
+6. On abort (no detach): inner command is orphaned; the extension kills it
+
+When `ctrl+b` is pressed, the extension writes "detach" to the control pipe, then calls `ctx.abort()` to free pi's main loop. The surviving process is adopted as a background job and monitored via polling.
+
+## Usage
+
+### Keyboard shortcuts
+
+| Key | Action |
+|-----|--------|
+| `ctrl+b` | Background the currently executing bash command; if nothing is executing, show the job selector |
+| `ctrl+f` | Cycle: off → compact tail widget → full-page scrolling follow → off |
+| `alt+f` | Full-page scrolling follow for the most recent job directly |
+| `ctrl+j` | Toggle the interactive job selector |
+| `` ctrl+` `` | Show tail of the most recent job in chat |
+
+### Commands
+
+| Command | Description |
+|---------|-------------|
+| `/bg [extra]` | Background the current bash command (same as `ctrl+b`) |
+| `/job` | Interactive job picker (up/down to navigate, `x` to kill, `ctrl+f` to follow) |
+| `/job ls` | Static job list |
+| `/job follow [id\|#]` | Toggle compact live-tailing widget below the editor. Defaults to most recent job. |
+| `/job fullfollow [id\|#]` | Full-page scrolling follow overlay. Alias: `ff`. Defaults to most recent job. |
+| `/job tail [id\|#]` | Snapshot of the last ~40 KB of output printed into chat |
+| `/job kill [id\|#]` | Kill a running job (SIGTERM, then SIGKILL after 500ms) |
+| `/job trim [N]` | Keep only N most recent finished jobs (default 5) |
+| `/job gc` | Delete orphaned files from state dir |
+
+Numeric indices (`1`, `2`, ...) match the order shown in `/job ls`.
+
+## Job selector
+
+The interactive job selector (`ctrl+j` or `/job`) shows:
+
+```
+> abc123   5m ● infdate         run ./infdate.sh
+  def456  12m ✓ make            make -j8 all
+  ghi789  15m ✗ deploy          sudo ./deploy.sh
+```
+
+Status icons: `●` running (yellow), `✓` exited (green), `✗` killed (red), `?` unknown (dim).
+
+Keys: `↑↓` navigate, `x` kill, `ctrl+f` toggle follow, `ctrl+b`/`ctrl+j`/`esc` close.
 
 ## State
 
 Jobs are tracked as custom session entries (survive `/reload`). Process liveness is re-checked on `session_start`.
 
 File artifacts in `~/.pi/agent/state/background/`:
-- `bg-ctrl-<unique>.out` — the command's stdout+stderr (what `/job follow` / `/job tail` reads)
+- `bg-ctrl-<unique>.out` — the command's stdout+stderr (what follow widgets tail); cleaned up on normal exit, kept on detach
 - `bg-ctrl-<unique>.pid` — PID of the inner process (cleaned up on exit)
 - `bg-ctrl-<unique>.pipe` — control FIFO for detach signaling (cleaned up on exit)
 
-## Usage
-
-### Keyboard shortcut
-
-| Key | Action |
-|-----|--------|
-| `ctrl+b` | Background the currently executing bash command; if nothing is executing, show the job selector |
-| `ctrl+f` | Toggle the live tail widget for the most recent job (open if closed, close if open) |
-| `alt+f` | Full-page scrolling follow for the most recent job (up/down/PgUp/PgDn/Home/End to scroll, auto-follows new output) |
-
-### Commands
-
-| Command | Description |
-|---------|-------------|
-| `/job` | Interactive job picker (up/down to select, Enter to follow) |
-| `/job ls` | Static job list |
-| `/job follow [id\|#]` | Toggle live-tailing widget below the editor (non-blocking, chat remains usable). Defaults to most recent job. |
-| `/job fullfollow [id\|#]` | Full-page scrolling follow overlay with scroll controls. Alias: `ff`. Defaults to most recent job. |
-| `/job tail [id\|#]` | Snapshot of the last ~40 KB of output printed into chat |
-| `/job attach [id\|#]` | Attach to the job's pi session file (replaces current session) — only available if the job was spawned as a full pi subprocess |
-| `/job kill [id\|#]` | Kill a running job |
-| `/job trim [N]` | Keep only N most recent finished jobs (default 5) |
-| `/job gc` | Delete orphaned files from state dir |
-
-Numeric indices (`#1`, `#2`, …) match the order shown in `/job ls`.
-
-## Behaviour
-
-- **Process wrapping**: Every bash command is wrapped via `spawnHook` with `wrapper.ts`, which runs the command under `setsid`. This creates a new process group so the inner command survives when pi aborts its own process tree. On `ctrl+b` / `/bg`, a detach signal is sent over a control pipe; the wrapper exits while the inner process keeps running.
-- **`currentBashCtrl` tracking**: The extension tracks the active wrapped bash invocation so `ctrl+b` backgrounds the actual running command, not the conversational user message.
-- **Auto-trim**: The job list is automatically trimmed to the 5 most recent finished jobs on every listing and every new `/bg` spawn (`AUTO_TRIM_KEEP = 5` at top of file).
-- **Exit notifications**: When a job exits, you get an info/warning/error notification based on exit code / signal.
-- **Footer widget**: Shows `bg:N` while N jobs are running.
-
 ## Known issues / limitations
 
-- The follow widget uses `fs.watch` for real-time updates (event-driven, no buffering lag), with a 500ms polling fallback for filesystems where `fs.watch` is unreliable.
-- The widget appears below the editor (above the status bar) so the chat remains fully visible and interactive.
-- Close with `ctrl+f` or by running `/job follow <id>` again on the same job (toggle).
-- `ctrl+b` conflicts with cursor-left in some terminals.
+- `ctrl+b` conflicts with cursor-left in some terminals (pi's built-in binding is overridden by the extension).
+- `ctrl+f` conflicts with cursor-right (same).
+- `alt+f` conflicts with cursor-word-right (same).
+- Exit codes are not available for backgrounded jobs (the wrapper has already exited; `isPidAlive` polling can only detect alive/dead).
+- The follow widget uses `fs.watch` + 500ms polling fallback for real-time updates.

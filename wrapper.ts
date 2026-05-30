@@ -56,7 +56,8 @@ const tailInterval = setInterval(() => {
 	}
 }, 100);
 
-// Open the FIFO non-blocking so we don't get stuck
+// Open the FIFO non-blocking and keep it open for the lifetime of the wrapper.
+// This ensures a writer can connect at any time via O_WRONLY.
 let pipeFd: number | null = null;
 try {
 	pipeFd = fs.openSync(pipePath, fs.constants.O_RDONLY | fs.constants.O_NONBLOCK);
@@ -80,7 +81,7 @@ const pipeInterval = pipeFd !== null ? setInterval(() => {
 			process.exit(0);
 		}
 	} catch (e: any) {
-		// EAGAIN means no data yet — that's normal for non-blocking reads
+		// EAGAIN means no data yet — normal for non-blocking reads
 		if (e?.code !== "EAGAIN") {
 			clearInterval(pipeInterval!);
 		}

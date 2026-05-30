@@ -315,6 +315,30 @@ describe("wrapper.ts", () => {
 		await sleep(200);
 	});
 
+	it("detaches after a 3-second delay (simulates late ctrl+b)", async () => {
+		const pipePath = path.join(tmpDir, "late.pipe");
+		const pidFile = path.join(tmpDir, "late.pid");
+		const outFile = path.join(tmpDir, "late.out");
+
+		const child = spawnWrapper(pipePath, pidFile, outFile, "sleep 60");
+
+		await waitForFile(pidFile, 3000);
+		const innerPid = parseInt(fs.readFileSync(pidFile, "utf8").trim(), 10);
+		assert.ok(isPidAlive(innerPid), "inner process should be alive");
+
+		// Wait 3 seconds before detaching
+		await sleep(3000);
+
+		await writeToFifo(pipePath, "detach\n");
+
+		const { exitCode } = await waitForClose(child, 3000);
+		assert.equal(exitCode, 0, "wrapper should exit 0 on late detach");
+		assert.ok(isPidAlive(innerPid), "inner process should survive late detach");
+
+		process.kill(innerPid, "SIGTERM");
+		await sleep(200);
+	});
+
 	it("wrapper forwards output to stdout during normal operation", async () => {
 		const pipePath = path.join(tmpDir, "fwd.pipe");
 		const pidFile = path.join(tmpDir, "fwd.pid");

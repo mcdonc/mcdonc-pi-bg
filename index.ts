@@ -225,7 +225,7 @@ export default function (pi: ExtensionAPI) {
 		// without killing the inner process. Retry a few times in case
 		// the wrapper's FIFO reader hasn't opened the read end yet.
 		let detachSent = false;
-		for (let i = 0; i < 5; i++) {
+		for (let i = 0; i < 30; i++) {
 			try {
 				const fd = fs.openSync(ctrl.pipePath, fs.constants.O_WRONLY | fs.constants.O_NONBLOCK);
 				fs.writeSync(fd, "detach\n");
@@ -233,7 +233,7 @@ export default function (pi: ExtensionAPI) {
 				detachSent = true;
 				break;
 			} catch {
-				await new Promise((r) => setTimeout(r, 50));
+				await new Promise((r) => setTimeout(r, 100));
 			}
 		}
 		if (!detachSent) {

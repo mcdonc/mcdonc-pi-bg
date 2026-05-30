@@ -75,4 +75,3 @@ Numeric indices (`#1`, `#2`, …) match the order shown in `/job ls`.
 - The widget appears below the editor (above the status bar) so the chat remains fully visible and interactive.
 - Close with `ctrl+f` or by running `/job follow <id>` again on the same job (toggle).
 - `ctrl+b` conflicts with cursor-left in some terminals.
-- Many key combos are eaten by browser/desktop when running pi in a browser-based terminal (xterm.dart in Firefox etc.).

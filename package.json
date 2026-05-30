@@ -1,8 +1,12 @@
 {
-  "name": "pi-bg",
+  "name": "mcdonc-pi-bg",
   "version": "0.1.0",
   "private": true,
   "type": "module",
+  "keywords": ["pi-package"],
+  "pi": {
+    "extensions": ["./index.ts"]
+  },
   "dependencies": {
     "@earendil-works/pi-coding-agent": "latest",
     "@earendil-works/pi-tui": "latest"

@@ -729,8 +729,10 @@ export default function (pi: ExtensionAPI) {
 						} else if (matchesKey(data, "ctrl+f")) {
 							if (followedJobId) {
 								closeFollowWidget(ctx);
+								followState = "off";
 							} else if (currentJobs[selectedIndex]) {
 								followJob(currentJobs[selectedIndex]!.id, ctx);
+								followState = "tail";
 							}
 							tui.requestRender();
 						} else if (data === "x") {
@@ -1212,7 +1214,7 @@ export default function (pi: ExtensionAPI) {
 				},
 				invalidate: () => { tui.requestRender(); },
 				handleInput: (data: string) => {
-					if (kb.matches(data, "tui.select.cancel") || matchesKey(data, "q") || matchesKey(data, "alt+f") || matchesKey(data, "alt+g") || matchesKey(data, "ctrl+f") || matchesKey(data, "ctrl+b")) {
+					if (kb.matches(data, "tui.select.cancel") || matchesKey(data, "q") || matchesKey(data, "ctrl+f") || matchesKey(data, "ctrl+b")) {
 						cleanup();
 					} else if (kb.matches(data, "tui.select.up")) {
 						autoFollow = false;
@@ -1246,41 +1248,35 @@ export default function (pi: ExtensionAPI) {
 		}, { overlay: true, overlayOptions: { width: "90%", margin: { left: 2, right: 2, top: 5, bottom: 5 } } });
 	};
 
-	const fullFollowHandler = async (ctx: ExtensionContext) => {
-		refreshLiveness();
-		const sorted = [...jobs.values()].sort((a, b) => b.startedAt - a.startedAt);
-		jobIndex = sorted.map((j) => j.id);
-		if (sorted.length === 0) {
-			ctx.ui.notify("No background jobs.", "info");
-			return;
-		}
-		await showFullPageFollow(jobIndex[0]!, ctx);
-	};
-
-	pi.registerShortcut("alt+f", {
-		description: "Full-page scrolling follow for the most recent background job",
-		handler: fullFollowHandler,
-	});
-
-	pi.registerShortcut("alt+g", {
-		description: "Full-page scrolling follow (alt+f alias for Firefox/xterm.dart)",
-		handler: fullFollowHandler,
-	});
+	// ctrl+f cycles: off → follow pane → full follow → off
+	let followState: "off" | "tail" | "full" = "off";
 
 	pi.registerShortcut("ctrl+f", {
-		description: "Toggle the bg-follow tail widget (or open most recent job)",
+		description: "Cycle: off → follow pane → full follow → off",
 		handler: async (ctx) => {
-			if (followedJobId) {
-				closeFollowWidget(ctx);
-			} else {
-				refreshLiveness();
-				const sorted = [...jobs.values()].sort((a, b) => b.startedAt - a.startedAt);
-				jobIndex = sorted.map((j) => j.id);
-				if (sorted.length === 0) {
-					ctx.ui.notify("No background jobs.", "info");
-					return;
-				}
+			refreshLiveness();
+			const sorted = [...jobs.values()].sort((a, b) => b.startedAt - a.startedAt);
+			jobIndex = sorted.map((j) => j.id);
+
+			if (sorted.length === 0) {
+				ctx.ui.notify("No background jobs.", "info");
+				followState = "off";
+				return;
+			}
+
+			if (followState === "off") {
 				followJob(jobIndex[0]!, ctx);
+				followState = "tail";
+			} else if (followState === "tail") {
+				closeFollowWidget(ctx);
+				followState = "full";
+				await showFullPageFollow(jobIndex[0]!, ctx);
+				followState = "off";
+			} else {
+				// "full" — shouldn't normally reach here since full follow
+				// blocks until closed, but reset just in case
+				closeFollowWidget(ctx);
+				followState = "off";
 			}
 		},
 	});

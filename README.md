@@ -37,19 +37,6 @@ tests        # run the test suite
 runpi        # launch pi with the extension loaded
 ```
 
-## How it works
-
-Every bash command pi executes is wrapped via a `spawnHook` through `wrapper.ts`. The wrapper:
-
-1. Runs the actual command under `setsid` (new process session/group) with stdout/stderr redirected to a `.out` file
-2. Tails the output file and forwards to pi's stdout so pi sees output normally
-3. Listens on a FIFO (named pipe) for a "detach" message
-4. On detach: wrapper exits cleanly, inner command keeps running and writing to the file
-5. On normal exit: wrapper cleans up all temp files and propagates the exit code
-6. On abort (no detach): inner command is orphaned; the extension kills it
-
-When `ctrl+b` is pressed, the extension writes "detach" to the control pipe, then calls `ctx.abort()` to free pi's main loop. The surviving process is adopted as a background job and monitored via polling.
-
 ## Usage
 
 ### Keyboard shortcuts
@@ -91,6 +78,19 @@ The interactive job selector (`ctrl+j` or `/job`) shows:
 Status icons: `●` running (yellow), `✓` exited (green), `✗` killed (red), `?` unknown (dim).
 
 Keys: `↑↓` navigate, `x` kill, `ctrl+f` toggle follow, `ctrl+b`/`ctrl+j`/`esc` close.
+
+## How it works
+
+Every bash command pi executes is wrapped via a `spawnHook` through `wrapper.ts`. The wrapper:
+
+1. Runs the actual command under `setsid` (new process session/group) with stdout/stderr redirected to a `.out` file
+2. Tails the output file and forwards to pi's stdout so pi sees output normally
+3. Listens on a FIFO (named pipe) for a "detach" message
+4. On detach: wrapper exits cleanly, inner command keeps running and writing to the file
+5. On normal exit: wrapper cleans up all temp files and propagates the exit code
+6. On abort (no detach): inner command is orphaned; the extension kills it
+
+When `ctrl+b` is pressed, the extension writes "detach" to the control pipe, then calls `ctx.abort()` to free pi's main loop. The surviving process is adopted as a background job and monitored via polling.
 
 ## State
 

@@ -1,0 +1,10 @@
+{
+  "name": "pi-bg",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "dependencies": {
+    "@earendil-works/pi-coding-agent": "latest",
+    "@earendil-works/pi-tui": "latest"
+  }
+}

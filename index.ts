@@ -15,7 +15,6 @@
  * they survive /reload. Process liveness is rechecked on session_start.
  */
 
-import { spawn } from "node:child_process";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
@@ -24,16 +23,18 @@ import type {
 	ExtensionCommandContext,
 	ExtensionContext,
 } from "@earendil-works/pi-coding-agent";
+import { createBashTool } from "@earendil-works/pi-coding-agent";
 import { Container, Text, matchesKey, visibleWidth, truncateToWidth } from "@earendil-works/pi-tui";
 import type { Component, Theme, TUI } from "@earendil-works/pi-tui";
+import { ensureDir, shortId, fmtAge, slugifyCommand, isPidAlive, shellQuote, buildWrapperCommand } from "./lib.ts";
 
 interface BgJobRecord {
 	id: string;
 	prompt: string;
 	slug?: string;
 	extra?: string;
-	sessionFile: string;
-	logFile: string;
+	sessionFile?: string;
+	logFile?: string;
 	outputFile: string;
 	pid: number;
 	startedAt: number;
@@ -54,77 +55,6 @@ interface LastPromptRecord {
 	timestamp: number;
 }
 
-function ensureDir(p: string): void {
-	fs.mkdirSync(p, { recursive: true });
-}
-
-function shortId(): string {
-	return Math.random().toString(36).slice(2, 8);
-}
-
-function fmtAge(ms: number): string {
-	const s = Math.floor(ms / 1000);
-	if (s < 60) return `${s}s`;
-	const m = Math.floor(s / 60);
-	if (m < 60) return `${m}m`;
-	const h = Math.floor(m / 60);
-	if (h < 24) return `${h}h${m % 60}m`;
-	return `${Math.floor(h / 24)}d${h % 24}h`;
-}
-
-/**
- * Generate a simple slug from a bash command.
- * Extracts the main command and a few key details.
- */
-function slugifyCommand(cmd: string): string {
-	if (!cmd) return "unknown";
-	const clean = cmd.trim().replace(/\n/g, " ");
-	const match = clean.match(/^(?:(?:nohup|sudo|time|nice)\s+)*(\w+)/);
-	const mainCmd = match?.[1] ?? "cmd";
-	if (clean.includes("sleep")) {
-		const sleepMatch = clean.match(/sleep\s+(\d+)/);
-		if (sleepMatch) return `sleep-${sleepMatch[1]}s`;
-	}
-	if (clean.includes("for i in")) {
-		const seqMatch = clean.match(/seq\s+\d+\s+(\d+)/);
-		if (seqMatch) return `loop-${seqMatch[1]}`;
-	}
-	if (clean.includes(" > ") || clean.includes(">> ")) {
-		const outMatch = clean.match(/>>?\s*([^\s;|&]+)/);
-		if (outMatch) {
-			const file = path.basename(outMatch[1]!);
-			return `${mainCmd}-to-${file}`;
-		}
-	}
-	return mainCmd.slice(0, 20);
-}
-
-function isPidAlive(pid: number): boolean {
-	if (!pid || pid <= 0) return false;
-	try {
-		process.kill(pid, 0);
-		return true;
-	} catch (e: any) {
-		return e?.code === "EPERM"; // exists but not ours
-	}
-}
-
-/**
- * Locate the pi entrypoint to spawn. Mirrors subagent example.
- */
-function getPiInvocation(args: string[]): { command: string; args: string[] } {
-	const currentScript = process.argv[1];
-	const isBunVirtualScript = currentScript?.startsWith("/$bunfs/root/");
-	if (currentScript && !isBunVirtualScript && fs.existsSync(currentScript)) {
-		return { command: process.execPath, args: [currentScript, ...args] };
-	}
-	const execName = path.basename(process.execPath).toLowerCase();
-	const isGenericRuntime = /^(node|bun)(\.exe)?$/.test(execName);
-	if (!isGenericRuntime) {
-		return { command: process.execPath, args };
-	}
-	return { command: "pi", args };
-}
 
 export default function (pi: ExtensionAPI) {
 	ensureDir(STATE_DIR);
@@ -139,6 +69,32 @@ export default function (pi: ExtensionAPI) {
 	let followedJobId: string | null = null;
 	let currentTailWidget: TailWidget | null = null;
 	let jobSelectorOpen = false;
+
+	let currentBashCtrl: {
+		pipePath: string;
+		pidFile: string;
+		outFile: string;
+		command: string;
+	} | null = null;
+
+	// --- Bash tool with spawnHook ------------------------------------------
+
+	const bashTool = createBashTool(process.cwd(), {
+		spawnHook: ({ command, cwd, env }) => {
+			const unique = `${Date.now()}-${Math.random().toString(36).slice(2, 6)}`;
+			const pipePath = path.join(STATE_DIR, `bg-ctrl-${unique}.pipe`);
+			const pidFile = path.join(STATE_DIR, `bg-ctrl-${unique}.pid`);
+			const outFile = path.join(STATE_DIR, `bg-ctrl-${unique}.out`);
+
+			currentBashCtrl = { pipePath, pidFile, outFile, command };
+
+			const wrapperScript = path.join(path.dirname(new URL(import.meta.url).pathname), "wrapper.ts");
+			const wrapped = buildWrapperCommand({ wrapperScript, pipePath, pidFile, outFile, command });
+			return { command: wrapped, cwd, env };
+		},
+	});
+
+	pi.registerTool({ ...bashTool });
 
 	const killAllRunning = () => {
 		for (const job of jobs.values()) {
@@ -220,6 +176,7 @@ export default function (pi: ExtensionAPI) {
 
 	pi.on("tool_execution_end", async (_event, _ctx) => {
 		toolExecuting = false;
+		currentBashCtrl = null;
 	});
 
 	pi.on("turn_end", async (_event, ctx) => {
@@ -246,6 +203,14 @@ export default function (pi: ExtensionAPI) {
 			return;
 		}
 
+		if (!currentBashCtrl) {
+			ctx.ui.notify(
+				"No active bash command to background.",
+				"warning",
+			);
+			return;
+		}
+
 		if (lastPromptBackgroundedAt === lastPromptAt) {
 			ctx.ui.notify(
 				"This prompt was already backgrounded. Send a new prompt first.",
@@ -254,119 +219,84 @@ export default function (pi: ExtensionAPI) {
 			return;
 		}
 
-		const wasBusy = !ctx.isIdle();
-		if (wasBusy) {
-			ctx.abort();
-			await new Promise((r) => setTimeout(r, 150));
+		const ctrl = currentBashCtrl;
+
+		// Write "detach" to the control pipe to tell the wrapper to exit
+		// without killing the inner process. Retry a few times in case
+		// the wrapper's FIFO reader hasn't opened the read end yet.
+		let detachSent = false;
+		for (let i = 0; i < 5; i++) {
+			try {
+				const fd = fs.openSync(ctrl.pipePath, fs.constants.O_WRONLY | fs.constants.O_NONBLOCK);
+				fs.writeSync(fd, "detach\n");
+				fs.closeSync(fd);
+				detachSent = true;
+				break;
+			} catch {
+				await new Promise((r) => setTimeout(r, 50));
+			}
+		}
+		if (!detachSent) {
+			ctx.ui.notify("Failed to signal detach: control pipe not ready", "error");
+			return;
+		}
+
+		// Give the wrapper a moment to process the detach signal
+		await new Promise((r) => setTimeout(r, 200));
+
+		// Now abort pi's main loop
+		ctx.abort();
+
+		// Read the inner PID from the PID file
+		let innerPid = -1;
+		try {
+			const pidStr = fs.readFileSync(ctrl.pidFile, "utf8").trim();
+			innerPid = Number.parseInt(pidStr, 10);
+		} catch (e: any) {
+			ctx.ui.notify(`Failed to read inner PID: ${e?.message ?? e}`, "error");
+			return;
+		}
+
+		if (!innerPid || innerPid <= 0 || !isPidAlive(innerPid)) {
+			ctx.ui.notify("Inner process already exited.", "warning");
+			return;
 		}
 
 		const id = shortId();
-		const sessionFile = path.join(STATE_DIR, `bg-${id}.jsonl`);
-		const logFile = path.join(STATE_DIR, `bg-${id}.log`);
-		const outputFile = path.join(STATE_DIR, `bg-${id}.out`);
-
-		const noteSuffix = extra ? `\n\nAdditional instruction from user: ${extra}` : "";
-		const childPrompt =
-			`## SYSTEM INSTRUCTION - BACKGROUND TASK\n\n` +
-			`You are a background agent. Do NOT respond to this message conversationally. ` +
-			`Do NOT explain anything. Do NOT ask questions. ` +
-			`Immediately execute the following user request:\n\n` +
-			`${lastBashCommand ?? lastPrompt ?? "(no task)"}${noteSuffix}\n\n` +
-			`### Execution rules\n` +
-			`1. Redirect the command's stdout and stderr to ${outputFile} so the user can ` +
-			`monitor progress in real time.\n` +
-			`2. Do NOT background the command with \`&\` — this pi process is already ` +
-			`running as a background job.\n` +
-			`3. The command may run for hours or days. Use a very large timeout (e.g., ` +
-			`86400 seconds or more) when calling the bash tool.`;
-
-		const effectivePrompt = childPrompt;
-		const piArgs = ["--session", sessionFile, "-p", childPrompt];
-		const currentModel = ctx.model;
-		if (currentModel?.provider && currentModel?.id) {
-			piArgs.push("--model", `${currentModel.provider}/${currentModel.id}`);
-		}
-		const invocation = getPiInvocation(piArgs);
-
-		const out = fs.openSync(logFile, "a");
-		const err = fs.openSync(logFile, "a");
-		fs.writeSync(
-			out,
-			`\n=== bg job ${id} started at ${new Date().toISOString()} ===\n` +
-				`cwd: ${ctx.cwd}\nprompt:\n${effectivePrompt}\n=== output ===\n`,
-		);
-
-		let child;
-		try {
-			child = spawn(invocation.command, invocation.args, {
-				cwd: ctx.cwd,
-				detached: true,
-				stdio: ["ignore", out, err],
-				env: { ...process.env, PI_BG_JOB: id },
-			});
-		} catch (e: any) {
-			try { fs.closeSync(out); } catch { /* ignore */ }
-			try { fs.closeSync(err); } catch { /* ignore */ }
-			try { fs.unlinkSync(sessionFile); } catch { /* ignore */ }
-			try { fs.unlinkSync(logFile); } catch { /* ignore */ }
-			ctx.ui.notify(`Failed to spawn bg job: ${e?.message ?? e}`, "error");
-			return;
-		}
-		if (!child.pid) {
-			try { fs.closeSync(out); } catch { /* ignore */ }
-			try { fs.closeSync(err); } catch { /* ignore */ }
-			try { fs.unlinkSync(sessionFile); } catch { /* ignore */ }
-			try { fs.unlinkSync(logFile); } catch { /* ignore */ }
-			ctx.ui.notify("Failed to spawn bg job: no pid", "error");
-			return;
-		}
+		const outputFile = ctrl.outFile;
 
 		const job: BgJobRecord = {
 			id,
 			prompt: lastPrompt,
 			slug: slugifyCommand(lastBashCommand ?? lastPrompt ?? ""),
 			extra: extra || undefined,
-			sessionFile,
-			logFile,
 			outputFile,
-			pid: child.pid ?? -1,
+			pid: innerPid,
 			startedAt: Date.now(),
-			status: child.pid ? "running" : "unknown",
+			status: "running",
 		};
 		persist(job);
 		lastPromptBackgroundedAt = lastPromptAt;
+		currentBashCtrl = null;
 
-		child.on("exit", (code, signal) => {
-			const killed = signal === "SIGTERM" || signal === "SIGKILL";
-			const updated: BgJobRecord = {
-				...job,
-				endedAt: Date.now(),
-				exitCode: code ?? undefined,
-				status: killed ? "killed" : "exited",
-			};
-			try {
-				fs.writeSync(
-					out,
-					`\n=== bg job ${id} ended ${new Date().toISOString()} ` +
-						`code=${code} signal=${signal ?? ""} ===\n`,
-				);
-			} catch { /* ignore */ }
-			try { fs.closeSync(out); } catch { /* ignore */ }
-			try { fs.closeSync(err); } catch { /* ignore */ }
-			persist(updated);
-			updateStatusWidget(ctx);
-			const wasTerminated = code === 143 || code === 137 || killed;
-			const level: "info" | "warning" | "error" = wasTerminated
-				? "warning"
-				: (code ?? 0) === 0
-					? "info"
-					: "error";
-			const suffix = wasTerminated ? "killed" : `exited code=${code ?? "?"}`;
-			ctx.ui.notify(`bg job ${id} ${suffix}`, level);
-		});
+		// Poll for process exit
+		const pollInterval = setInterval(() => {
+			if (!isPidAlive(innerPid)) {
+				clearInterval(pollInterval);
+				const updated: BgJobRecord = {
+					...job,
+					endedAt: Date.now(),
+					exitCode: undefined,
+					status: "exited",
+				};
+				persist(updated);
+				updateStatusWidget(ctx);
+				ctx.ui.notify(`bg job ${id} exited`, "info");
+			}
+		}, 1000);
 
 		ctx.ui.notify(
-			`Backgrounded as ${id}${wasBusy ? " (aborted current turn)" : ""}`,
+			`Backgrounded as ${id} (pid ${innerPid})`,
 			"info",
 		);
 		trimFinished(AUTO_TRIM_KEEP);
@@ -537,15 +467,29 @@ export default function (pi: ExtensionAPI) {
 	};
 
 	function removeJobFiles(job: BgJobRecord) {
-		try { fs.unlinkSync(job.sessionFile); } catch { /* ignore */ }
-		try { fs.unlinkSync(job.logFile); } catch { /* ignore */ }
+		if (job.sessionFile) try { fs.unlinkSync(job.sessionFile); } catch { /* ignore */ }
+		if (job.logFile) try { fs.unlinkSync(job.logFile); } catch { /* ignore */ }
 		try { fs.unlinkSync(job.outputFile); } catch { /* ignore */ }
+		// Clean up control pipe and pid files that may exist in STATE_DIR
+		// These share the same basename pattern as the .out file
+		const outBase = path.basename(job.outputFile, ".out");
+		if (outBase.startsWith("bg-ctrl-")) {
+			try { fs.unlinkSync(path.join(STATE_DIR, `${outBase}.pipe`)); } catch { /* ignore */ }
+			try { fs.unlinkSync(path.join(STATE_DIR, `${outBase}.pid`)); } catch { /* ignore */ }
+		}
 	}
 
 	const jobAttach = async (rest: string, ctx: ExtensionCommandContext) => {
 		const job = resolveJobRef(rest);
 		if (!job) {
 			ctx.ui.notify(`No such job: ${rest || "(empty)"}`, "warning");
+			return;
+		}
+		if (!job.sessionFile) {
+			ctx.ui.notify(
+				`Job ${job.id} has no session file (detached process). Use tail or follow instead.`,
+				"warning",
+			);
 			return;
 		}
 		if (!fs.existsSync(job.sessionFile)) {
@@ -639,9 +583,15 @@ export default function (pi: ExtensionAPI) {
 		let removed = 0;
 		const tracked = new Set<string>();
 		for (const job of jobs.values()) {
-			tracked.add(path.basename(job.sessionFile));
-			tracked.add(path.basename(job.logFile));
+			if (job.sessionFile) tracked.add(path.basename(job.sessionFile));
+			if (job.logFile) tracked.add(path.basename(job.logFile));
 			tracked.add(path.basename(job.outputFile));
+			// Also track associated .pipe and .pid files
+			const outBase = path.basename(job.outputFile, ".out");
+			if (outBase.startsWith("bg-ctrl-")) {
+				tracked.add(`${outBase}.pipe`);
+				tracked.add(`${outBase}.pid`);
+			}
 		}
 		try {
 			for (const name of fs.readdirSync(STATE_DIR)) {

@@ -124,7 +124,7 @@ export default function (pi: ExtensionAPI) {
 		refreshLiveness();
 		const running = [...jobs.values()].filter((j) => j.status === "running").length;
 		if (running > 0) {
-			ctx.ui.setStatus("bg", `⚙ bg:${running}`);
+			ctx.ui.setStatus("bg", `⚙ bg:${running} (ctrl-j for jobs)`);
 		} else {
 			ctx.ui.setStatus("bg", "");
 		}

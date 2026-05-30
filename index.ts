@@ -137,6 +137,7 @@ export default function (pi: ExtensionAPI) {
 	let toolExecuting = false;
 	let lastBashCommand: string | null = null;
 	let followedJobId: string | null = null;
+	let currentTailWidget: TailWidget | null = null;
 	let jobSelectorOpen = false;
 
 	const persist = (job: BgJobRecord) => {
@@ -649,7 +650,7 @@ export default function (pi: ExtensionAPI) {
 		ctx.ui.notify(`Removed ${removed} orphaned file(s) from ${STATE_DIR}.`, "info");
 	};
 
-	const SUBCOMMANDS = ["ls", "attach", "tail", "kill", "trim", "follow", "gc", "help"] as const;
+	const SUBCOMMANDS = ["ls", "attach", "tail", "kill", "trim", "follow", "gc", "redraw", "help"] as const;
 
 	/**
 	 * Show an interactive job selector with kill support (x key).
@@ -672,14 +673,23 @@ export default function (pi: ExtensionAPI) {
 			await ctx.ui.custom<void>((tui, theme, kb, done) => {
 				let selectedIndex = 0;
 				let currentJobs = sorted;
+				let scrollOffset = 0;
 
 				const rebuildJobs = () => {
 					refreshLiveness();
 					currentJobs = [...jobs.values()].sort((a, b) => b.startedAt - a.startedAt);
 					selectedIndex = Math.min(selectedIndex, Math.max(0, currentJobs.length - 1));
+					scrollOffset = Math.max(0, Math.min(scrollOffset, Math.max(0, currentJobs.length - 6)));
 				};
 
 				const handleNavigation = () => {
+					// Update scroll offset to keep selected job visible
+					const MAX_JOBS = 6;
+					if (selectedIndex < scrollOffset) {
+						scrollOffset = selectedIndex;
+					} else if (selectedIndex >= scrollOffset + MAX_JOBS) {
+						scrollOffset = Math.max(0, selectedIndex - MAX_JOBS + 1);
+					}
 					if (followedJobId && currentJobs[selectedIndex]) {
 						followJob(currentJobs[selectedIndex]!.id, ctx);
 					}
@@ -701,12 +711,13 @@ export default function (pi: ExtensionAPI) {
 							theme.fg("border", "─".repeat(dashR) + "╮")
 						);
 
-						// Job list with fixed-width columns (max 10 visible)
-						const MAX_JOBS = 10;
+						// Job list with fixed-width columns (max 6 visible, with scrolling)
+						const MAX_JOBS = 6;
 						const visibleCount = Math.min(currentJobs.length, MAX_JOBS);
 						for (let i = 0; i < visibleCount; i++) {
-							const job = currentJobs[i]!;
-							const prefix = i === selectedIndex ? "> " : "  ";
+							const jobIdx = scrollOffset + i;
+							const job = currentJobs[jobIdx]!;
+							const prefix = jobIdx === selectedIndex ? "> " : "  ";
 
 							// Column 1: Job ID (6 chars)
 							const jobId = job.id.padEnd(6);
@@ -744,9 +755,10 @@ export default function (pi: ExtensionAPI) {
 							result.push(theme.fg("border", "│") + truncated + padding + theme.fg("border", "│"));
 						}
 
-						// Pad to fixed height to prevent ghosting when follow widget changes height
+						// Pad with empty bordered lines to fixed height (prevent ghosting from follow widget below)
 						for (let i = visibleCount; i < MAX_JOBS; i++) {
-							result.push(theme.fg("border", "│") + " ".repeat(innerW) + theme.fg("border", "│"));
+							const emptyLine = " ".repeat(innerW);
+							result.push(theme.fg("border", "│") + emptyLine + theme.fg("border", "│"));
 						}
 
 						// Help text
@@ -807,7 +819,7 @@ export default function (pi: ExtensionAPI) {
 
 	pi.registerCommand("job", {
 		description:
-			`Manage background pi jobs. Subcommands: ls (default), attach <id|#>, tail <id|#>, kill <id|#>, trim <N>, follow <id|#>, gc. Auto-trims to ${AUTO_TRIM_KEEP} finished jobs.`,
+			`Manage background pi jobs. Subcommands: ls (default), attach <id|#>, tail <id|#>, kill <id|#>, trim <N>, follow <id|#>, gc, redraw. Auto-trims to ${AUTO_TRIM_KEEP} finished jobs.`,
 		getArgumentCompletions: (prefix) => {
 			const trimmed = prefix.trimStart();
 			const firstSpace = trimmed.indexOf(" ");
@@ -877,10 +889,14 @@ export default function (pi: ExtensionAPI) {
 				case "trim":
 					jobTrim(rest, ctx);
 					return;
+				case "redraw":
+				case "rd":
+					process.kill(process.pid, "SIGWINCH");
+					return;
 				case "help":
 				case "?":
 					ctx.ui.notify(
-						`/job (interactive) / job ls / attach / tail / kill / trim / follow / gc (auto-keeps ${AUTO_TRIM_KEEP} finished)`,
+						`/job (interactive) / job ls / attach / tail / kill / trim / follow / gc / redraw (auto-keeps ${AUTO_TRIM_KEEP} finished)`,
 						"info",
 					);
 					return;
@@ -924,6 +940,29 @@ export default function (pi: ExtensionAPI) {
 			this.job = job;
 			this.jobsMap = jobsMap;
 			this.start();
+		}
+
+		/** Switch to a different job without recreating the widget. */
+		switchJob(job: BgJobRecord): void {
+			// Stop watching the old file
+			if (this.watcher) { try { this.watcher.close(); } catch { /* ignore */ } this.watcher = null; }
+			// Reset state
+			this.job = job;
+			this.lines = [];
+			this.partial = "";
+			this.readPos = 0;
+			this.cachedWidth = undefined;
+			// Start watching new file (poll interval continues running)
+			this.readNewData();
+			try {
+				this.watcher = fs.watch(this.job.outputFile, { persistent: false }, () => {
+					if (this.disposed) return;
+					this.readNewData();
+					this.tui.requestRender();
+				});
+				this.watcher.on("error", () => { this.watcher = null; });
+			} catch { /* fall through to polling */ }
+			this.tui.requestRender();
 		}
 
 		private start(): void {
@@ -1029,6 +1068,10 @@ export default function (pi: ExtensionAPI) {
 	}
 
 	const closeFollowWidget = (ctx: ExtensionContext) => {
+		if (currentTailWidget) {
+			currentTailWidget.dispose();
+			currentTailWidget = null;
+		}
 		ctx.ui.setWidget("bg-follow", undefined);
 		followedJobId = null;
 	};
@@ -1049,13 +1092,21 @@ export default function (pi: ExtensionAPI) {
 			try { fs.writeFileSync(job.outputFile, ""); } catch { /* ignore */ }
 		}
 
-		followedJobId = job.id;
-
-		ctx.ui.setWidget(
-			"bg-follow",
-			(tui, theme) => new TailWidget(tui, theme, job, jobs),
-			{ placement: "belowEditor" },
-		);
+		// If widget already exists, switch its job without recreating to avoid ghosting
+		if (currentTailWidget) {
+			followedJobId = job.id;
+			currentTailWidget.switchJob(job);
+		} else {
+			followedJobId = job.id;
+			ctx.ui.setWidget(
+				"bg-follow",
+				(tui, theme) => {
+					currentTailWidget = new TailWidget(tui, theme, job, jobs);
+					return currentTailWidget;
+				},
+				{ placement: "belowEditor" },
+			);
+		}
 	};
 
 	pi.registerShortcut("ctrl+f", {
@@ -1080,6 +1131,13 @@ export default function (pi: ExtensionAPI) {
 		description: "Toggle job selector widget",
 		handler: async (ctx) => {
 			await showJobSelector(ctx);
+		},
+	});
+
+	pi.registerShortcut("ctrl+l", {
+		description: "Force redraw via SIGWINCH",
+		handler: async (_ctx) => {
+			process.kill(process.pid, "SIGWINCH");
 		},
 	});
 }

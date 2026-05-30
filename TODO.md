@@ -1,11 +1,10 @@
 # TODO
 
-## improve-job-follow ✓
+## full-page-follow ✓
 
-Cause `job follow` to create a UI control that shows `tail -f`-like output of a
-subagent's current task, does not obscure the entire screen, allows its own
-scrollback, and isn't foiled by buffering.
+Provide full-page scrolling follow output if ctrl-shift-F is pressed (as opposed
+to the compact below-editor widget that ctrl+f toggles).
 
-Done: `/job follow` now uses `setWidget("bg-follow", ..., { placement: "belowEditor" })`
-instead of a full-screen overlay. Chat remains fully usable. `ctrl+f` toggles the
-widget. `fs.watch` + 500ms polling fallback avoids buffering issues.
+Done: `alt+f` opens a full-page overlay via `ctx.ui.custom()` with scrolling
+(up/down/PgUp/PgDn/Home/End). Auto-follows new output unless the user scrolls up.
+Also available as `/job fullfollow` or `/job ff`.

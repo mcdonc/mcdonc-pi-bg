@@ -35,6 +35,7 @@ Session files are kept out of `~/.pi/agent/sessions/` so they don't pollute `/re
 |-----|--------|
 | `ctrl+b` | Background the last bash command (or last prompt if no bash command ran) |
 | `ctrl+f` | Toggle the live tail widget for the most recent job (open if closed, close if open) |
+| `alt+f` | Full-page scrolling follow for the most recent job (up/down/PgUp/PgDn/Home/End to scroll, auto-follows new output) |
 
 ### Commands
 
@@ -43,6 +44,7 @@ Session files are kept out of `~/.pi/agent/sessions/` so they don't pollute `/re
 | `/job` | Interactive job picker (up/down to select, Enter to follow) |
 | `/job ls` | Static job list |
 | `/job follow [id\|#]` | Toggle live-tailing widget below the editor (non-blocking, chat remains usable). Defaults to most recent job. |
+| `/job fullfollow [id\|#]` | Full-page scrolling follow overlay with scroll controls. Alias: `ff`. Defaults to most recent job. |
 | `/job tail [id\|#]` | Snapshot of last 50 lines printed into chat |
 | `/job attach [id\|#]` | Attach to the child pi session (replaces current session) |
 | `/job kill [id\|#]` | Kill a running job |

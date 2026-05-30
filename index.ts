@@ -140,6 +140,16 @@ export default function (pi: ExtensionAPI) {
 	let currentTailWidget: TailWidget | null = null;
 	let jobSelectorOpen = false;
 
+	const killAllRunning = () => {
+		for (const job of jobs.values()) {
+			if (job.status === "running" && isPidAlive(job.pid)) {
+				try { process.kill(-job.pid, "SIGTERM"); } catch { /* ignore */ }
+			}
+		}
+	};
+
+	process.on("exit", killAllRunning);
+
 	const persist = (job: BgJobRecord) => {
 		jobs.set(job.id, job);
 		pi.appendEntry(CUSTOM_TYPE, job);
@@ -302,8 +312,6 @@ export default function (pi: ExtensionAPI) {
 			ctx.ui.notify(`Failed to spawn bg job: ${e?.message ?? e}`, "error");
 			return;
 		}
-		child.unref();
-
 		if (!child.pid) {
 			try { fs.closeSync(out); } catch { /* ignore */ }
 			try { fs.closeSync(err); } catch { /* ignore */ }
@@ -607,10 +615,11 @@ export default function (pi: ExtensionAPI) {
 			ctx.ui.notify(`Failed to kill ${job.id}: ${e?.message ?? e}`, "error");
 		}
 		setTimeout(() => {
-			if (!isPidAlive(job.pid)) {
-				persist({ ...job, status: "killed", endedAt: Date.now() });
-				updateStatusWidget(ctx);
+			if (isPidAlive(job.pid)) {
+				try { process.kill(-job.pid, "SIGKILL"); } catch { /* ignore */ }
 			}
+			persist({ ...job, status: "killed", endedAt: Date.now() });
+			updateStatusWidget(ctx);
 		}, 500);
 	};
 
@@ -650,7 +659,7 @@ export default function (pi: ExtensionAPI) {
 		ctx.ui.notify(`Removed ${removed} orphaned file(s) from ${STATE_DIR}.`, "info");
 	};
 
-	const SUBCOMMANDS = ["ls", "attach", "tail", "kill", "trim", "follow", "gc", "redraw", "help"] as const;
+	const SUBCOMMANDS = ["ls", "attach", "tail", "kill", "trim", "follow", "fullfollow", "gc", "redraw", "help"] as const;
 
 	/**
 	 * Show an interactive job selector with kill support (x key).
@@ -797,11 +806,16 @@ export default function (pi: ExtensionAPI) {
 							if (job && job.status === "running") {
 								try {
 									process.kill(-job.pid, "SIGTERM");
-									persist({ ...job, status: "killed", endedAt: Date.now() });
-									updateStatusWidget(ctx);
 									ctx.ui.notify(`Sent SIGTERM to ${job.id} process group (pid ${job.pid})`, "info");
-									rebuildJobs();
-									tui.requestRender();
+									setTimeout(() => {
+										if (isPidAlive(job.pid)) {
+											try { process.kill(-job.pid, "SIGKILL"); } catch { /* ignore */ }
+										}
+										persist({ ...job, status: "killed", endedAt: Date.now() });
+										updateStatusWidget(ctx);
+										rebuildJobs();
+										tui.requestRender();
+									}, 500);
 								} catch (e: any) {
 									ctx.ui.notify(`Failed to kill ${job.id}: ${e?.message ?? e}`, "error");
 								}
@@ -883,6 +897,22 @@ export default function (pi: ExtensionAPI) {
 						followJob(rest, ctx);
 					}
 					return;
+				case "fullfollow":
+				case "ff":
+					if (!rest) {
+						refreshLiveness();
+						const sorted2 = [...jobs.values()].sort((a, b) => b.startedAt - a.startedAt);
+						jobIndex = sorted2.map((j) => j.id);
+						const latest2 = jobIndex.length > 0 ? jobIndex[0] : null;
+						if (!latest2) {
+							ctx.ui.notify("No background jobs.", "info");
+							return;
+						}
+						await showFullPageFollow(latest2, ctx);
+					} else {
+						await showFullPageFollow(rest, ctx);
+					}
+					return;
 				case "gc":
 					jobGc(ctx);
 					return;
@@ -896,7 +926,7 @@ export default function (pi: ExtensionAPI) {
 				case "help":
 				case "?":
 					ctx.ui.notify(
-						`/job (interactive) / job ls / attach / tail / kill / trim / follow / gc / redraw (auto-keeps ${AUTO_TRIM_KEEP} finished)`,
+						`/job (interactive) / job ls / attach / tail / kill / trim / follow / fullfollow / gc / redraw (auto-keeps ${AUTO_TRIM_KEEP} finished)`,
 						"info",
 					);
 					return;
@@ -1108,6 +1138,199 @@ export default function (pi: ExtensionAPI) {
 			);
 		}
 	};
+
+	/**
+	 * Full-page scrolling follow overlay. Reads the job's output file
+	 * incrementally (like TailWidget) and allows scrolling through the
+	 * entire history. Auto-follows new output unless the user has scrolled up.
+	 */
+	const showFullPageFollow = async (jobRef: string, ctx: ExtensionContext): Promise<void> => {
+		const job = resolveJobRef(jobRef);
+		if (!job) {
+			ctx.ui.notify(`No such job: ${jobRef || "(empty)"}`, "warning");
+			return;
+		}
+		if (!fs.existsSync(job.outputFile)) {
+			try { fs.writeFileSync(job.outputFile, ""); } catch { /* ignore */ }
+		}
+
+		if (followedJobId) {
+			closeFollowWidget(ctx);
+		}
+
+		await ctx.ui.custom<void>((tui, theme, kb, done) => {
+			let lines: string[] = [];
+			let partial = "";
+			let readPos = 0;
+			let scrollOffset = 0;
+			let autoFollow = true;
+			let watcher: fs.FSWatcher | null = null;
+			let pollInterval: ReturnType<typeof setInterval> | null = null;
+			let disposed = false;
+
+			const readNewData = () => {
+				let fd: number | null = null;
+				try {
+					const stat = fs.statSync(job.outputFile);
+					if (stat.size <= readPos) return;
+					const chunkSize = stat.size - readPos;
+					const buf = Buffer.alloc(chunkSize);
+					fd = fs.openSync(job.outputFile, "r");
+					const bytesRead = fs.readSync(fd, buf, 0, chunkSize, readPos);
+					readPos += bytesRead;
+					const text = partial + buf.slice(0, bytesRead).toString("utf8");
+					const parts = text.split("\n");
+					for (let i = 0; i < parts.length - 1; i++) lines.push(parts[i]!);
+					partial = parts[parts.length - 1]!;
+				} catch { /* file may not exist yet */ }
+				finally { if (fd !== null) try { fs.closeSync(fd); } catch { /* ignore */ } }
+			};
+
+			readNewData();
+
+			try {
+				watcher = fs.watch(job.outputFile, { persistent: false }, () => {
+					if (disposed) return;
+					readNewData();
+					if (autoFollow) scrollOffset = Math.max(0, lines.length);
+					tui.requestRender();
+				});
+				watcher.on("error", () => { watcher = null; });
+			} catch { /* fall through to polling */ }
+
+			pollInterval = setInterval(() => {
+				if (disposed) return;
+				const before = readPos;
+				readNewData();
+				if (readPos !== before) {
+					if (autoFollow) scrollOffset = Math.max(0, lines.length);
+					tui.requestRender();
+				}
+			}, 500);
+
+			const cleanup = () => {
+				if (disposed) return;
+				disposed = true;
+				if (watcher) { try { watcher.close(); } catch { /* ignore */ } }
+				if (pollInterval) { clearInterval(pollInterval); }
+				done();
+			};
+
+			return {
+				render: (width: number) => {
+					const innerW = Math.max(1, width - 2);
+					const termHeight = process.stdout.rows || 24;
+					const result: string[] = [];
+
+					// Title bar
+					const jobStatus = jobs.get(job.id)?.status ?? job.status;
+					const statusRaw =
+						jobStatus === "running" ? "running" :
+						jobStatus === "exited" ? "done" :
+						jobStatus === "killed" ? "killed" : jobStatus;
+					const statusStyled =
+						jobStatus === "running" ? theme.fg("warning", "● " + statusRaw) :
+						jobStatus === "exited" ? theme.fg("success", "✓ " + statusRaw) :
+						jobStatus === "killed" ? theme.fg("error", "✗ " + statusRaw) :
+						theme.fg("muted", statusRaw);
+					const followIndicator = autoFollow ? theme.fg("success", "FOLLOW") : theme.fg("dim", "SCROLL");
+					const titlePlain = ` bg:${job.id} ${statusRaw}  ${autoFollow ? "FOLLOW" : "SCROLL"}  esc close `;
+					const titleW = Math.min(visibleWidth(titlePlain), innerW);
+					const dashL = Math.floor((innerW - titleW) / 2);
+					const dashR = Math.max(0, innerW - titleW - dashL);
+					const titleStyled =
+						` bg:${theme.fg("accent", job.id)} ${statusStyled}  ${followIndicator}  ` +
+						theme.fg("dim", "esc close") + " ";
+					result.push(
+						theme.fg("border", "╭" + "─".repeat(dashL)) +
+						titleStyled +
+						theme.fg("border", "─".repeat(dashR) + "╮")
+					);
+
+					// Content area: termHeight minus top/bottom margin (5+5) and chrome (title + help + bottom border = 3)
+					const contentRows = Math.max(1, termHeight - 10 - 3);
+					const display = partial ? [...lines, partial + "▌"] : [...lines];
+					if (display.length === 0) display.push("(no output yet)");
+
+					if (autoFollow) {
+						scrollOffset = Math.max(0, display.length - contentRows);
+					}
+					const maxScroll = Math.max(0, display.length - contentRows);
+					scrollOffset = Math.max(0, Math.min(scrollOffset, maxScroll));
+
+					const pad = (s: string) => {
+						const truncated = truncateToWidth(s, innerW, "");
+						return truncated + " ".repeat(Math.max(0, innerW - visibleWidth(truncated)));
+					};
+
+					for (let i = 0; i < contentRows; i++) {
+						const lineIdx = scrollOffset + i;
+						const raw = lineIdx < display.length ? display[lineIdx]! : "";
+						const line = theme.fg("border", "│") + pad(theme.fg("toolOutput", raw)) + theme.fg("border", "│");
+						result.push(truncateToWidth(line, width, ""));
+					}
+
+					// Help bar
+					const lineInfo = `${Math.min(scrollOffset + 1, display.length)}-${Math.min(scrollOffset + contentRows, display.length)}/${display.length}`;
+					const help = ` ↑↓ scroll • PgUp/PgDn • Home/End • esc close  ${lineInfo} `;
+					const helpTruncated = truncateToWidth(theme.fg("dim", help), innerW, "");
+					const helpPadding = " ".repeat(Math.max(0, innerW - visibleWidth(helpTruncated)));
+					result.push(theme.fg("border", "│") + helpTruncated + helpPadding + theme.fg("border", "│"));
+
+					// Bottom border
+					result.push(theme.fg("border", "╰" + "─".repeat(innerW) + "╯"));
+
+					return result;
+				},
+				invalidate: () => { tui.requestRender(); },
+				handleInput: (data: string) => {
+					if (kb.matches(data, "tui.select.cancel") || matchesKey(data, "q") || matchesKey(data, "alt+f") || matchesKey(data, "ctrl+f") || matchesKey(data, "ctrl+b")) {
+						cleanup();
+					} else if (kb.matches(data, "tui.select.up")) {
+						autoFollow = false;
+						scrollOffset = Math.max(0, scrollOffset - 1);
+						tui.requestRender();
+					} else if (kb.matches(data, "tui.select.down")) {
+						scrollOffset++;
+						const display = partial ? lines.length + 1 : lines.length;
+						const maxScroll = Math.max(0, display - 1);
+						if (scrollOffset >= maxScroll) autoFollow = true;
+						tui.requestRender();
+					} else if (matchesKey(data, "pageup")) {
+						autoFollow = false;
+						scrollOffset = Math.max(0, scrollOffset - 20);
+						tui.requestRender();
+					} else if (matchesKey(data, "pagedown")) {
+						scrollOffset += 20;
+						autoFollow = true; // will be recalculated on render
+						tui.requestRender();
+					} else if (matchesKey(data, "home")) {
+						autoFollow = false;
+						scrollOffset = 0;
+						tui.requestRender();
+					} else if (matchesKey(data, "end")) {
+						autoFollow = true;
+						scrollOffset = Math.max(0, lines.length);
+						tui.requestRender();
+					}
+				},
+			};
+		}, { overlay: true, overlayOptions: { width: "90%", margin: { left: 5, right: 5, top: 5, bottom: 5 } } });
+	};
+
+	pi.registerShortcut("alt+f", {
+		description: "Full-page scrolling follow for the most recent background job",
+		handler: async (ctx) => {
+			refreshLiveness();
+			const sorted = [...jobs.values()].sort((a, b) => b.startedAt - a.startedAt);
+			jobIndex = sorted.map((j) => j.id);
+			if (sorted.length === 0) {
+				ctx.ui.notify("No background jobs.", "info");
+				return;
+			}
+			await showFullPageFollow(jobIndex[0]!, ctx);
+		},
+	});
 
 	pi.registerShortcut("ctrl+f", {
 		description: "Toggle the bg-follow tail widget (or open most recent job)",

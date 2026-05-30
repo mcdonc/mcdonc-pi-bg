@@ -325,20 +325,6 @@ export default function (pi: ExtensionAPI) {
 		},
 	});
 
-	pi.registerShortcut("ctrl+`", {
-		description: "Tail the most recent background job",
-		handler: async (ctx) => {
-			refreshLiveness();
-			const list = [...jobs.values()].sort((a, b) => b.startedAt - a.startedAt);
-			jobIndex = list.map((j) => j.id);
-			if (list.length === 0) {
-				ctx.ui.notify("No background jobs.", "info");
-				return;
-			}
-			jobTail("1", ctx);
-		},
-	});
-
 	// --- /jobs and friends -------------------------------------------------
 
 	let jobIndex: string[] = [];

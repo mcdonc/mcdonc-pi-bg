@@ -213,7 +213,7 @@ describe("wrapper.ts", () => {
 		], { stdio: ["ignore", "pipe", "pipe"] });
 	};
 
-	it("runs a command and captures output to stdout and file", async () => {
+	it("runs a command and captures output to stdout", async () => {
 		const pipePath = path.join(tmpDir, "run.pipe");
 		const pidFile = path.join(tmpDir, "run.pid");
 		const outFile = path.join(tmpDir, "run.out");
@@ -223,11 +223,9 @@ describe("wrapper.ts", () => {
 
 		assert.equal(exitCode, 0);
 		assert.ok(stdout.includes("wrapper-test"), `stdout: ${stdout}`);
-
-		const outContent = fs.readFileSync(outFile, "utf8");
-		assert.ok(outContent.includes("wrapper-test"), `outFile: ${outContent}`);
 		assert.ok(!fs.existsSync(pidFile), "pidFile should be cleaned up");
 		assert.ok(!fs.existsSync(pipePath), "pipe should be cleaned up");
+		assert.ok(!fs.existsSync(outFile), "outFile should be cleaned up on normal exit");
 	});
 
 	it("captures stderr too", async () => {
@@ -241,10 +239,34 @@ describe("wrapper.ts", () => {
 		assert.equal(exitCode, 0);
 		assert.ok(stdout.includes("out-msg"), `stdout: ${stdout}`);
 		assert.ok(stdout.includes("err-msg"), `stderr missing: ${stdout}`);
+	});
 
-		const outContent = fs.readFileSync(outFile, "utf8");
-		assert.ok(outContent.includes("out-msg"));
-		assert.ok(outContent.includes("err-msg"));
+	it("handles commands with && and shell metacharacters", async () => {
+		const pipePath = path.join(tmpDir, "meta.pipe");
+		const pidFile = path.join(tmpDir, "meta.pid");
+		const outFile = path.join(tmpDir, "meta.out");
+
+		const child = spawnWrapper(pipePath, pidFile, outFile,
+			"echo first && echo second; echo 'third $HOME'");
+		const { stdout, exitCode } = await waitForClose(child, 5000);
+
+		assert.equal(exitCode, 0);
+		assert.ok(stdout.includes("first"), `stdout: ${stdout}`);
+		assert.ok(stdout.includes("second"), `stdout: ${stdout}`);
+		assert.ok(stdout.includes("third $HOME"), `stdout: ${stdout}`);
+	});
+
+	it("cleans up .out file on normal exit", async () => {
+		const pipePath = path.join(tmpDir, "cleanup.pipe");
+		const pidFile = path.join(tmpDir, "cleanup.pid");
+		const outFile = path.join(tmpDir, "cleanup.out");
+
+		const child = spawnWrapper(pipePath, pidFile, outFile, "echo done");
+		await waitForClose(child, 5000);
+
+		assert.ok(!fs.existsSync(pipePath), "pipe should be cleaned up");
+		assert.ok(!fs.existsSync(pidFile), "pid file should be cleaned up");
+		assert.ok(!fs.existsSync(outFile), "out file should be cleaned up on normal exit");
 	});
 
 	it("propagates non-zero exit code", async () => {
@@ -352,11 +374,6 @@ describe("wrapper.ts", () => {
 		assert.ok(stdout.includes("stdout-line-1"), `stdout missing line 1: ${stdout}`);
 		assert.ok(stdout.includes("stdout-line-2"), `stdout missing line 2: ${stdout}`);
 		assert.ok(stdout.includes("stderr-line"), `stdout missing stderr: ${stdout}`);
-
-		// Output file should have the same content
-		const outContent = fs.readFileSync(outFile, "utf8");
-		assert.ok(outContent.includes("stdout-line-1"));
-		assert.ok(outContent.includes("stderr-line"));
 	});
 
 	it("inner process dies when wrapper is killed without detach", async () => {

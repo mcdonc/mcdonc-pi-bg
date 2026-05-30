@@ -108,6 +108,7 @@ child.on("close", (code) => {
 	try { fs.closeSync(outFd); } catch { /* ignore */ }
 	try { fs.unlinkSync(pipePath); } catch { /* ignore */ }
 	try { fs.unlinkSync(pidFile); } catch { /* ignore */ }
+	try { fs.unlinkSync(outFile); } catch { /* ignore */ }
 	process.exit(code ?? 1);
 });
 

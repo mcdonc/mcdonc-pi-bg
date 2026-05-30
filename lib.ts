@@ -90,6 +90,6 @@ export function buildWrapperCommand(opts: {
 		shellQuote(opts.pipePath),
 		shellQuote(opts.pidFile),
 		shellQuote(opts.outFile),
-		opts.command,
+		shellQuote(opts.command),
 	].join(" ");
 }

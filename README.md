@@ -34,6 +34,7 @@ Session files are kept out of `~/.pi/agent/sessions/` so they don't pollute `/re
 | Key | Action |
 |-----|--------|
 | `ctrl+b` | Background the last bash command (or last prompt if no bash command ran) |
+| `ctrl+f` | Toggle the live tail widget for the most recent job (open if closed, close if open) |
 
 ### Commands
 
@@ -41,7 +42,7 @@ Session files are kept out of `~/.pi/agent/sessions/` so they don't pollute `/re
 |---------|-------------|
 | `/job` | Interactive job picker (up/down to select, Enter to follow) |
 | `/job ls` | Static job list |
-| `/job follow [id\|#]` | Live-tailing overlay (Esc/q to close). Defaults to most recent job. |
+| `/job follow [id\|#]` | Toggle live-tailing widget below the editor (non-blocking, chat remains usable). Defaults to most recent job. |
 | `/job tail [id\|#]` | Snapshot of last 50 lines printed into chat |
 | `/job attach [id\|#]` | Attach to the child pi session (replaces current session) |
 | `/job kill [id\|#]` | Kill a running job |
@@ -60,7 +61,8 @@ Numeric indices (`#1`, `#2`, …) match the order shown in `/job ls`.
 
 ## Known issues / limitations
 
-- The follow overlay is a polling overlay (1s interval), not a true `tail -f`. Output appears with up to 1s lag.
-- The overlay renders on top of the conversation; you cannot see the conversation and the output simultaneously (pi limitation — no live-updating component inside the scroll area via the extension API).
+- The follow widget uses `fs.watch` for real-time updates (event-driven, no buffering lag), with a 500ms polling fallback for filesystems where `fs.watch` is unreliable.
+- The widget appears below the editor (above the status bar) so the chat remains fully visible and interactive.
+- Close with `ctrl+f` or by running `/job follow <id>` again on the same job (toggle).
 - `ctrl+b` conflicts with cursor-left in some terminals.
 - Many key combos are eaten by browser/desktop when running pi in a browser-based terminal (xterm.dart in Firefox etc.).

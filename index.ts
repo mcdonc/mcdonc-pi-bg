@@ -124,7 +124,7 @@ export default function (pi: ExtensionAPI) {
 		refreshLiveness();
 		const running = [...jobs.values()].filter((j) => j.status === "running").length;
 		if (running > 0) {
-			ctx.ui.setStatus("bg", `bg:${running}`);
+			ctx.ui.setStatus("bg", `⚙ bg:${running}`);
 		} else {
 			ctx.ui.setStatus("bg", "");
 		}
@@ -297,7 +297,7 @@ export default function (pi: ExtensionAPI) {
 
 		ctx.ui.notify(
 			`Backgrounded as ${id} (pid ${innerPid})`,
-			"info",
+			"warning",
 		);
 		trimFinished(AUTO_TRIM_KEEP);
 		updateStatusWidget(ctx);
@@ -609,7 +609,7 @@ export default function (pi: ExtensionAPI) {
 		ctx.ui.notify(`Removed ${removed} orphaned file(s) from ${STATE_DIR}.`, "info");
 	};
 
-	const SUBCOMMANDS = ["ls", "attach", "tail", "kill", "trim", "follow", "fullfollow", "gc", "redraw", "help"] as const;
+	const SUBCOMMANDS = ["ls", "attach", "tail", "kill", "trim", "follow", "fullfollow", "gc", "help"] as const;
 
 	/**
 	 * Show an interactive job selector with kill support (x key).
@@ -678,37 +678,19 @@ export default function (pi: ExtensionAPI) {
 							const job = currentJobs[jobIdx]!;
 							const prefix = jobIdx === selectedIndex ? "> " : "  ";
 
-							// Column 1: Job ID (6 chars)
 							const jobId = job.id.padEnd(6);
-							// Column 2: Age (6 chars)
-							const age = fmtAge(now - job.startedAt).padStart(6);
-							// Column 3: Status (25 chars) - styled but padded to fixed width
-							const statusRaw =
-								job.status === "running"
-									? `running pid=${job.pid}`
-									: job.status === "killed"
-										? "killed"
-										: job.status === "exited"
-											? `exited code=${job.exitCode ?? "?"}`
-											: job.status;
-							const statusStyled =
-								job.status === "running"
-									? theme.fg("warning", statusRaw)
-									: job.status === "killed"
-										? theme.fg("error", statusRaw)
-										: job.status === "exited"
-											? theme.fg("success", statusRaw)
-											: theme.fg("muted", statusRaw);
-							const statusPadded = statusStyled + " ".repeat(Math.max(0, 25 - statusRaw.length));
-							// Column 4: Slug (20 chars)
-							const slug = (job.slug ?? "?").padEnd(20).slice(0, 20);
-							// Column 5: Prompt (30 chars max)
+							const age = fmtAge(now - job.startedAt).padStart(5);
+							const statusChar =
+								job.status === "running" ? theme.fg("warning", "●")
+								: job.status === "killed" ? theme.fg("error", "✗")
+								: job.status === "exited" ? theme.fg("success", "✓")
+								: theme.fg("muted", "?");
+							const slug = (job.slug ?? "?").slice(0, 15).padEnd(15);
 							const promptPreview = job.prompt.length > 30 ? `${job.prompt.slice(0, 30)}…` : job.prompt;
 
-							// Don't wrap entire line in accent - just highlight prefix and ID to avoid nested ANSI width issues
 							const prefix2 = i === selectedIndex ? theme.fg("accent", prefix) : prefix;
 							const jobId2 = i === selectedIndex ? theme.fg("accent", jobId) : jobId;
-							const line = `${prefix2}${jobId2}  ${age}  ${statusPadded}  ${slug}  ${promptPreview}`;
+							const line = `${prefix2}${jobId2} ${age} ${statusChar} ${slug}  ${promptPreview}`;
 							const truncated = truncateToWidth(line, innerW, "");
 							const padding = " ".repeat(Math.max(0, innerW - visibleWidth(truncated)));
 							result.push(theme.fg("border", "│") + truncated + padding + theme.fg("border", "│"));
@@ -775,7 +757,7 @@ export default function (pi: ExtensionAPI) {
 						}
 					},
 				};
-			}, { overlay: true, overlayOptions: { width: "90%", margin: { left: 5, right: 5 } } });
+			}, { overlay: true, overlayOptions: { width: "90%", margin: { left: 2, right: 2 } } });
 		} finally {
 			jobSelectorOpen = false;
 		}
@@ -783,7 +765,7 @@ export default function (pi: ExtensionAPI) {
 
 	pi.registerCommand("job", {
 		description:
-			`Manage background pi jobs. Subcommands: ls (default), attach <id|#>, tail <id|#>, kill <id|#>, trim <N>, follow <id|#>, gc, redraw. Auto-trims to ${AUTO_TRIM_KEEP} finished jobs.`,
+			`Manage background pi jobs. Subcommands: ls (default), attach <id|#>, tail <id|#>, kill <id|#>, trim <N>, follow <id|#>, gc. Auto-trims to ${AUTO_TRIM_KEEP} finished jobs.`,
 		getArgumentCompletions: (prefix) => {
 			const trimmed = prefix.trimStart();
 			const firstSpace = trimmed.indexOf(" ");
@@ -869,14 +851,10 @@ export default function (pi: ExtensionAPI) {
 				case "trim":
 					jobTrim(rest, ctx);
 					return;
-				case "redraw":
-				case "rd":
-					process.kill(process.pid, "SIGWINCH");
-					return;
 				case "help":
 				case "?":
 					ctx.ui.notify(
-						`/job (interactive) / job ls / attach / tail / kill / trim / follow / fullfollow / gc / redraw (auto-keeps ${AUTO_TRIM_KEEP} finished)`,
+						`/job (interactive) / job ls / attach / tail / kill / trim / follow / fullfollow / gc (auto-keeps ${AUTO_TRIM_KEEP} finished)`,
 						"info",
 					);
 					return;
@@ -1265,7 +1243,7 @@ export default function (pi: ExtensionAPI) {
 					}
 				},
 			};
-		}, { overlay: true, overlayOptions: { width: "90%", margin: { left: 5, right: 5, top: 5, bottom: 5 } } });
+		}, { overlay: true, overlayOptions: { width: "90%", margin: { left: 2, right: 2, top: 5, bottom: 5 } } });
 	};
 
 	pi.registerShortcut("alt+f", {
@@ -1307,10 +1285,4 @@ export default function (pi: ExtensionAPI) {
 		},
 	});
 
-	pi.registerShortcut("ctrl+l", {
-		description: "Force redraw via SIGWINCH",
-		handler: async (_ctx) => {
-			process.kill(process.pid, "SIGWINCH");
-		},
-	});
 }

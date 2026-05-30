@@ -4,13 +4,10 @@
  *
  * Usage: node --experimental-strip-types wrapper.ts <pipe_path> <pid_file> <out_file> <command>
  *
- * The command runs under setsid in its own session. Output goes to both
- * stdout (so pi sees it) and the out_file (so follow widgets can tail it).
- *
- * If "detach" is written to the control pipe, the wrapper exits 0 and the
- * inner process keeps running. If the wrapper is killed without a detach
- * message, the inner process is an orphan — the extension is responsible
- * for cleaning it up.
+ * The inner command's stdout/stderr are redirected directly to out_file.
+ * The wrapper tails the file and forwards to its own stdout so pi sees
+ * output in real time. On detach, the wrapper exits but the inner process
+ * keeps writing to the file — follow widgets can continue tailing it.
  */
 
 import { spawn, execSync } from "node:child_process";
@@ -31,23 +28,33 @@ try {
 	// May already exist
 }
 
-// Spawn inner command under setsid
-const child = spawn("setsid", ["bash", "-c", `echo $$ > ${shellQuote(pidFile)}; ${command}`], {
-	stdio: ["ignore", "pipe", "pipe"],
-});
-
-// Tee stdout and stderr to both stdout and the output file
+// Open the output file — inner command writes directly to it
 const outFd = fs.openSync(outFile, "a");
 
-child.stdout?.on("data", (chunk: Buffer) => {
-	process.stdout.write(chunk);
-	fs.writeSync(outFd, chunk);
+// Spawn inner command under setsid with stdout/stderr going to the file
+const child = spawn("setsid", ["bash", "-c", `echo $$ > ${shellQuote(pidFile)}; ${command}`], {
+	stdio: ["ignore", outFd, outFd],
 });
 
-child.stderr?.on("data", (chunk: Buffer) => {
-	process.stdout.write(chunk);
-	fs.writeSync(outFd, chunk);
-});
+// Tail the output file and forward to our stdout so pi sees it
+let tailPos = 0;
+const tailInterval = setInterval(() => {
+	try {
+		const stat = fs.statSync(outFile);
+		if (stat.size > tailPos) {
+			const buf = Buffer.alloc(stat.size - tailPos);
+			const fd = fs.openSync(outFile, "r");
+			const n = fs.readSync(fd, buf, 0, buf.length, tailPos);
+			fs.closeSync(fd);
+			if (n > 0) {
+				process.stdout.write(buf.slice(0, n));
+				tailPos += n;
+			}
+		}
+	} catch {
+		// File may not exist yet
+	}
+}, 100);
 
 // Open the FIFO non-blocking so we don't get stuck
 let pipeFd: number | null = null;
@@ -59,13 +66,14 @@ try {
 
 // Poll the FIFO for a "detach" message
 let detached = false;
-const pollInterval = pipeFd !== null ? setInterval(() => {
+const pipeInterval = pipeFd !== null ? setInterval(() => {
 	try {
 		const buf = Buffer.alloc(64);
 		const n = fs.readSync(pipeFd!, buf, 0, 64, null);
 		if (n > 0 && buf.slice(0, n).toString("utf8").trim() === "detach") {
 			detached = true;
-			clearInterval(pollInterval!);
+			clearInterval(pipeInterval!);
+			clearInterval(tailInterval);
 			try { fs.closeSync(pipeFd!); } catch { /* ignore */ }
 			try { fs.unlinkSync(pipePath); } catch { /* ignore */ }
 			try { fs.closeSync(outFd); } catch { /* ignore */ }
@@ -74,7 +82,7 @@ const pollInterval = pipeFd !== null ? setInterval(() => {
 	} catch (e: any) {
 		// EAGAIN means no data yet — that's normal for non-blocking reads
 		if (e?.code !== "EAGAIN") {
-			clearInterval(pollInterval!);
+			clearInterval(pipeInterval!);
 		}
 	}
 }, 100) : null;
@@ -82,7 +90,19 @@ const pollInterval = pipeFd !== null ? setInterval(() => {
 // Wait for the child to exit
 child.on("close", (code) => {
 	if (detached) return;
-	if (pollInterval) clearInterval(pollInterval);
+	// Flush remaining output
+	try {
+		const stat = fs.statSync(outFile);
+		if (stat.size > tailPos) {
+			const buf = Buffer.alloc(stat.size - tailPos);
+			const fd = fs.openSync(outFile, "r");
+			const n = fs.readSync(fd, buf, 0, buf.length, tailPos);
+			fs.closeSync(fd);
+			if (n > 0) process.stdout.write(buf.slice(0, n));
+		}
+	} catch { /* ignore */ }
+	clearInterval(tailInterval);
+	if (pipeInterval) clearInterval(pipeInterval);
 	if (pipeFd !== null) try { fs.closeSync(pipeFd); } catch { /* ignore */ }
 	try { fs.closeSync(outFd); } catch { /* ignore */ }
 	try { fs.unlinkSync(pipePath); } catch { /* ignore */ }

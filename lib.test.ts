@@ -74,6 +74,12 @@ describe("slugifyCommand", () => {
 		assert.equal(slugifyCommand("time nice make -j8"), "make");
 	});
 
+	it("handles ./ prefixed scripts", () => {
+		assert.equal(slugifyCommand("./infdate.sh"), "infdate");
+		assert.equal(slugifyCommand("./build.py arg1"), "build");
+		assert.equal(slugifyCommand("sudo ./deploy.sh"), "deploy");
+	});
+
 	it("detects sleep commands", () => {
 		assert.equal(slugifyCommand("sleep 300"), "sleep-300s");
 		assert.equal(slugifyCommand("bash -c 'sleep 10'"), "sleep-10s");
@@ -267,6 +273,58 @@ describe("wrapper.ts", () => {
 		// Clean up
 		process.kill(innerPid, "SIGTERM");
 		await sleep(200);
+	});
+
+	it("inner process continues writing to output file after detach", async () => {
+		const pipePath = path.join(tmpDir, "detach-out.pipe");
+		const pidFile = path.join(tmpDir, "detach-out.pid");
+		const outFile = path.join(tmpDir, "detach-out.out");
+
+		// Command that writes a line every 200ms
+		const child = spawnWrapper(pipePath, pidFile, outFile,
+			"for i in $(seq 1 100); do echo line-$i; sleep 0.2; done");
+
+		await waitForFile(pidFile, 3000);
+		const innerPid = parseInt(fs.readFileSync(pidFile, "utf8").trim(), 10);
+
+		// Wait for some output to appear
+		await sleep(500);
+		const sizeBefore = fs.statSync(outFile).size;
+		assert.ok(sizeBefore > 0, "should have output before detach");
+
+		// Detach
+		await writeToFifo(pipePath, "detach\n");
+		await waitForClose(child, 3000);
+
+		// Wait and verify the file keeps growing after wrapper exit
+		await sleep(600);
+		const sizeAfter = fs.statSync(outFile).size;
+		assert.ok(sizeAfter > sizeBefore,
+			`output file should keep growing after detach (before=${sizeBefore}, after=${sizeAfter})`);
+
+		// Clean up
+		process.kill(innerPid, "SIGTERM");
+		await sleep(200);
+	});
+
+	it("wrapper forwards output to stdout during normal operation", async () => {
+		const pipePath = path.join(tmpDir, "fwd.pipe");
+		const pidFile = path.join(tmpDir, "fwd.pid");
+		const outFile = path.join(tmpDir, "fwd.out");
+
+		const child = spawnWrapper(pipePath, pidFile, outFile,
+			"echo stdout-line-1; echo stdout-line-2; echo stderr-line >&2");
+		const { stdout, exitCode } = await waitForClose(child, 5000);
+
+		assert.equal(exitCode, 0);
+		assert.ok(stdout.includes("stdout-line-1"), `stdout missing line 1: ${stdout}`);
+		assert.ok(stdout.includes("stdout-line-2"), `stdout missing line 2: ${stdout}`);
+		assert.ok(stdout.includes("stderr-line"), `stdout missing stderr: ${stdout}`);
+
+		// Output file should have the same content
+		const outContent = fs.readFileSync(outFile, "utf8");
+		assert.ok(outContent.includes("stdout-line-1"));
+		assert.ok(outContent.includes("stderr-line"));
 	});
 
 	it("inner process dies when wrapper is killed without detach", async () => {

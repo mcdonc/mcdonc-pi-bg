@@ -18,5 +18,13 @@
     };
   };
 
+  scripts.tests.exec = ''
+    node --experimental-strip-types --test --test-timeout=10000 lib.test.ts "$@"
+  '';
+
+  scripts.runpi.exec = ''
+    pi --extension ./index.ts "$@"
+  '';
+
   # See full reference at https://devenv.sh/reference/options/
 }

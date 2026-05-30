@@ -1212,7 +1212,7 @@ export default function (pi: ExtensionAPI) {
 				},
 				invalidate: () => { tui.requestRender(); },
 				handleInput: (data: string) => {
-					if (kb.matches(data, "tui.select.cancel") || matchesKey(data, "q") || matchesKey(data, "alt+f") || matchesKey(data, "ctrl+f") || matchesKey(data, "ctrl+b")) {
+					if (kb.matches(data, "tui.select.cancel") || matchesKey(data, "q") || matchesKey(data, "alt+f") || matchesKey(data, "alt+g") || matchesKey(data, "ctrl+f") || matchesKey(data, "ctrl+b")) {
 						cleanup();
 					} else if (kb.matches(data, "tui.select.up")) {
 						autoFollow = false;
@@ -1246,18 +1246,25 @@ export default function (pi: ExtensionAPI) {
 		}, { overlay: true, overlayOptions: { width: "90%", margin: { left: 2, right: 2, top: 5, bottom: 5 } } });
 	};
 
+	const fullFollowHandler = async (ctx: ExtensionContext) => {
+		refreshLiveness();
+		const sorted = [...jobs.values()].sort((a, b) => b.startedAt - a.startedAt);
+		jobIndex = sorted.map((j) => j.id);
+		if (sorted.length === 0) {
+			ctx.ui.notify("No background jobs.", "info");
+			return;
+		}
+		await showFullPageFollow(jobIndex[0]!, ctx);
+	};
+
 	pi.registerShortcut("alt+f", {
 		description: "Full-page scrolling follow for the most recent background job",
-		handler: async (ctx) => {
-			refreshLiveness();
-			const sorted = [...jobs.values()].sort((a, b) => b.startedAt - a.startedAt);
-			jobIndex = sorted.map((j) => j.id);
-			if (sorted.length === 0) {
-				ctx.ui.notify("No background jobs.", "info");
-				return;
-			}
-			await showFullPageFollow(jobIndex[0]!, ctx);
-		},
+		handler: fullFollowHandler,
+	});
+
+	pi.registerShortcut("alt+g", {
+		description: "Full-page scrolling follow (alt+f alias for Firefox/xterm.dart)",
+		handler: fullFollowHandler,
 	});
 
 	pi.registerShortcut("ctrl+f", {

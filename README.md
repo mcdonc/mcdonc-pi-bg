@@ -45,9 +45,7 @@ runpi        # launch pi with the extension loaded
 |-----|--------|
 | `ctrl+b` | Background the currently executing bash command; if nothing is executing, show the job selector |
 | `ctrl+f` | Cycle: off → compact tail widget → full-page scrolling follow → off |
-| `alt+f` | Full-page scrolling follow for the most recent job directly |
 | `ctrl+j` | Toggle the interactive job selector |
-| `` ctrl+` `` | Show tail of the most recent job in chat |
 
 ### Commands
 
@@ -105,6 +103,5 @@ File artifacts in `~/.pi/agent/state/background/`:
 
 - `ctrl+b` conflicts with cursor-left in some terminals (pi's built-in binding is overridden by the extension).
 - `ctrl+f` conflicts with cursor-right (same).
-- `alt+f` conflicts with cursor-word-right (same).
 - Exit codes are not available for backgrounded jobs (the wrapper has already exited; `isPidAlive` polling can only detect alive/dead).
 - The follow widget uses `fs.watch` + 500ms polling fallback for real-time updates.

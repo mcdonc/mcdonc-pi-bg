@@ -102,6 +102,14 @@ describe("slugifyCommand", () => {
 	it("handles multiline commands", () => {
 		assert.equal(slugifyCommand("echo\nhello"), "echo");
 	});
+
+	it("handles absolute paths", () => {
+		assert.equal(slugifyCommand("/home/klangk/print_date.sh"), "print_date");
+	});
+
+	it("strips file extension from path commands", () => {
+		assert.equal(slugifyCommand("/usr/bin/python3 script.py"), "python3");
+	});
 });
 
 // ── isPidAlive ───────────────────────────────────────────────────────────

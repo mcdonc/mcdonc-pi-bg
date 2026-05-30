@@ -31,8 +31,13 @@ export function fmtAge(ms: number): string {
 export function slugifyCommand(cmd: string): string {
 	if (!cmd) return "unknown";
 	const clean = cmd.trim().replace(/\n/g, " ");
-	const match = clean.match(/^(?:(?:nohup|sudo|time|nice)\s+)*(?:\.\/)?([^\s/]+)/);
-	const mainCmd = match?.[1]?.replace(/\.\w+$/, "") ?? "cmd";
+	// Try to extract the command name, handling paths with slashes
+	let mainCmd = "cmd";
+	const firstWord = clean.match(/^(?:(?:nohup|sudo|time|nice)\s+)*([^\s]+)/);
+	if (firstWord?.[1]) {
+		const base = path.basename(firstWord[1]);
+		mainCmd = base.replace(/\.\w+$/, "");
+	}
 	if (clean.includes("sleep")) {
 		const sleepMatch = clean.match(/sleep\s+(\d+)/);
 		if (sleepMatch) return `sleep-${sleepMatch[1]}s`;

@@ -26,8 +26,7 @@ import type {
 import { createBashTool } from "@earendil-works/pi-coding-agent";
 import { Container, Text, matchesKey, visibleWidth, truncateToWidth } from "@earendil-works/pi-tui";
 import type { Component, Theme, TUI } from "@earendil-works/pi-tui";
-import { ensureDir, shortId, fmtAge, slugifyCommand, isPidAlive, shellQuote, buildWrapperCommand, searchBranches } from "./lib.ts";
-import type { BranchCandidate } from "./lib.ts";
+import { ensureDir, shortId, fmtAge, slugifyCommand, isPidAlive, shellQuote, buildWrapperCommand } from "./lib.ts";
 
 interface BgJobRecord {
 	id: string;
@@ -187,6 +186,7 @@ export default function (pi: ExtensionAPI) {
 		refreshLiveness();
 		updateStatusWidget(ctx);
 		updateForkStatus(ctx);
+
 	});
 
 	pi.on("before_agent_start", async (event, ctx) => {
@@ -224,8 +224,10 @@ export default function (pi: ExtensionAPI) {
 
 	/**
 	 * Fork from a shortcut handler (ExtensionContext only).
-	 * Aborts the turn, records the fork point, and pre-fills the editor
-	 * with /sqrl so the user just hits Enter to complete the navigation.
+	 * Pre-fills the editor with "/b " but does NOT abort yet. The agent
+	 * keeps streaming while the user decides. If the user submits, /s
+	 * aborts and forks. If the user hits Escape to clear the editor,
+	 * the original task continues uninterrupted.
 	 */
 	const runForkFromShortcut = (ctx: ExtensionContext) => {
 		if (!lastPrompt) {
@@ -237,43 +239,34 @@ export default function (pi: ExtensionAPI) {
 			return;
 		}
 
-		// Record the leaf before aborting
-		pendingForkLeafId = ctx.sessionManager.getLeafId() ?? null;
 		pendingForkPrompt = lastPrompt;
 
-		ctx.abort();
-
-		// Pre-fill the editor so the user just hits Enter
-		ctx.ui.setEditorText("/sqrl");
-		ctx.ui.notify("Press Enter to start a side conversation, or clear and type something else.", "info");
+		// Pre-fill editor with "/b " — user types their message after it.
+		// The abort happens in /b command handler, not here.
+		ctx.ui.setEditorText("/b ");
 	};
+
 
 	/**
 	 * Fork from a command handler (ExtensionCommandContext with navigateTree).
 	 * Completes the fork: navigates the tree to create a clean branch.
 	 */
 	const runForkFromCommand = async (ctx: ExtensionCommandContext) => {
-		let prompt = pendingForkPrompt ?? lastPrompt;
-		const wasPending = !!pendingForkLeafId;
+		const prompt = pendingForkPrompt ?? lastPrompt;
 		pendingForkLeafId = null;
 		pendingForkPrompt = null;
 
-		if (!wasPending) {
-			// Direct /sqrl invocation — need to abort first
-			if (!prompt) {
-				ctx.ui.notify("No prompt to fork from.", "warning");
-				return;
-			}
-			if (ctx.isIdle()) {
-				ctx.ui.notify("Nothing to fork — agent is idle.", "warning");
-				return;
-			}
+		if (!prompt) {
+			ctx.ui.notify("No prompt to fork from.", "warning");
+			return;
+		}
+
+		if (!ctx.isIdle()) {
 			ctx.abort();
 			await ctx.waitForIdle();
 		}
 
-		// Always get the leaf fresh — after abort has settled, it's at the
-		// aborted assistant message (or last tool result).
+		// Get the leaf fresh after abort has settled
 		const leafId = ctx.sessionManager.getLeafId() ?? null;
 
 		if (!leafId) {
@@ -321,7 +314,7 @@ export default function (pi: ExtensionAPI) {
 		pi.appendEntry(FORK_POINT_TYPE, fp);
 
 		updateForkStatus(ctx);
-		ctx.ui.notify(`Forked conversation (${fp.id}). /unsqrl when ready to continue.`, "warning");
+		ctx.ui.notify(`Forked conversation (${fp.id}). /bb when ready to continue.`, "warning");
 	};
 
 	// --- /bg ---------------------------------------------------------------
@@ -1418,160 +1411,70 @@ export default function (pi: ExtensionAPI) {
 		},
 	});
 
-	// --- /unsqrl -----------------------------------------------------------
+	// --- /bb ----------------------------------------------------------
 
-	pi.registerCommand("unsqrl", {
-		description: "Rejoin a forked conversation branch. Usage: /unsqrl (most recent) or /unsqrl <keywords>",
-		getArgumentCompletions: (prefix) => {
-			const trimmed = prefix.trimStart().toLowerCase();
-			const items: { value: string; label: string }[] = [];
-			for (const fp of forkStack) {
-				if (fp.resumed) continue;
-				const promptPreview = fp.prompt.length > 50 ? `${fp.prompt.slice(0, 50)}…` : fp.prompt;
-				if (!trimmed || fp.prompt.toLowerCase().includes(trimmed)) {
-					items.push({ value: fp.prompt.slice(0, 60), label: `${fp.id}: ${promptPreview}` });
-				}
-			}
-			return items.length > 0 ? items : null;
-		},
-		handler: async (args, ctx) => {
-			
-			const query = (args ?? "").trim();
-			if (!query) {
-				// DWIM: resume the most recent unresumed fork point
-				const recent = [...forkStack].reverse().find(f => !f.resumed);
-				if (!recent) {
-					ctx.ui.notify("No fork points to unsqrl. Use /unsqrl <keywords> to search branches.", "info");
-					return;
-				}
-				recent.resumed = true;
-				pi.appendEntry(FORK_POINT_TYPE, recent);
-				await ctx.navigateTree(recent.leafId);
-				updateForkStatus(ctx);
-				const prompt = recent.prompt;
-				pi.sendUserMessage(`Continue the task you were working on before I interrupted you. The original request was:\n\n<original-request>\n${prompt}\n</original-request>\n\nPick up where you left off.`);
+	pi.registerCommand("bb", {
+		description: "Rejoin the most recent forked conversation branch",
+		handler: async (_args, ctx) => {
+			const recent = [...forkStack].reverse().find(f => !f.resumed);
+			if (!recent) {
+				ctx.ui.notify("No fork points to rejoin.", "info");
 				return;
 			}
-
-			// Build branch candidates from session entries
-			const entries = ctx.sessionManager.getEntries();
-			const entryMap = new Map<string, typeof entries[number]>();
-			const childIds = new Set<string>();
-			for (const e of entries) {
-				entryMap.set(e.id, e);
-				if (e.parentId) childIds.add(e.parentId);
-			}
-
-			// Find leaves: entries whose IDs are not any entry's parentId
-			const leaves = entries.filter(e => !childIds.has(e.id));
-
-			const candidates: BranchCandidate[] = [];
-			for (const leaf of leaves) {
-				const textParts: string[] = [];
-				let current: typeof entries[number] | undefined = leaf;
-				while (current) {
-					if (current.type === "message") {
-						const msg = (current as any).message;
-						if (msg) {
-							if (typeof msg.content === "string") {
-								textParts.push(msg.content);
-							} else if (Array.isArray(msg.content)) {
-								for (const block of msg.content) {
-									if (typeof block === "string") {
-										textParts.push(block);
-									} else if (block && typeof block === "object" && "text" in block && typeof block.text === "string") {
-										textParts.push(block.text);
-									}
-								}
-							}
-						}
-					}
-					current = current.parentId ? entryMap.get(current.parentId) : undefined;
-				}
-				const text = textParts.join(" ");
-				const preview = text.slice(0, 80).replace(/\n/g, " ").trim() || "(empty branch)";
-				candidates.push({ leafId: leaf.id, text, preview });
-			}
-
-			// Boost fork point branches
-			const forkLeafIds = new Set(forkStack.map(f => f.leafId));
-			for (const c of candidates) {
-				if (forkLeafIds.has(c.leafId)) {
-					// Add fork point prompt text to boost matching
-					const fp = forkStack.find(f => f.leafId === c.leafId);
-					if (fp) {
-						c.text += " " + fp.prompt;
-					}
-				}
-			}
-
-			const results = searchBranches(query, candidates);
-			if (results.length === 0) {
-				ctx.ui.notify("No matching branches found.", "warning");
-				return;
-			}
-
-			// Clear winner: top score is strictly greater than second
-			const best = results[0]!;
-			const second = results.length > 1 ? results[1]! : null;
-			if (!second || best.score > second.score) {
-				// Navigate to the best match
-				await ctx.navigateTree(best.leafId);
-
-				// Mark matching fork point as resumed
-				const fp = forkStack.find(f => f.leafId === best.leafId);
-				if (fp) {
-					fp.resumed = true;
-					pi.appendEntry(FORK_POINT_TYPE, fp);
-					updateForkStatus(ctx);
-				}
-
-				const prompt = fp?.prompt ?? best.preview;
-				pi.sendUserMessage(`Continue the task you were working on before I interrupted you. The original request was:\n\n<original-request>\n${prompt}\n</original-request>\n\nPick up where you left off.`);
-				return;
-			}
-
-			// Ambiguous: show top candidates
-			const top = results.slice(0, 5);
-			const lines = top.map((r, i) => `${i + 1}. [score=${r.score}] ${r.preview}`);
-			ctx.ui.notify(
-				`Multiple matching branches:\n${lines.join("\n")}\n\nTry a more specific query, or use /tree to browse.`,
-				"info",
-			);
+			recent.resumed = true;
+			pi.appendEntry(FORK_POINT_TYPE, recent);
+			await ctx.navigateTree(recent.leafId);
+			updateForkStatus(ctx);
+			const prompt = recent.prompt;
+			pi.sendUserMessage(`Continue the task you were working on before I interrupted you. The original request was:\n\n<original-request>\n${prompt}\n</original-request>\n\nPick up where you left off.`, { deliverAs: "followUp" });
 		},
 	});
 
-	// --- /sqrl -------------------------------------------------------------
+	// --- /bbb -----------------------------------------------------------
 
-	pi.registerCommand("sqrl", {
-		description: "Fork the current conversation. Usage: /sqrl (fork now) or /sqrl ls (list fork points)",
+	pi.registerCommand("bbb", {
+		description: "Abandon all forks and resume the original (root) task",
+		handler: async (_args, ctx) => {
+			const unresumed = forkStack.filter(f => !f.resumed);
+			if (unresumed.length === 0) {
+				ctx.ui.notify("No fork points to abandon.", "info");
+				return;
+			}
+
+			// Find the earliest (root) fork — that's the one we want to resume
+			const root = unresumed.reduce((earliest, f) =>
+				f.forkTimestamp < earliest.forkTimestamp ? f : earliest
+			);
+
+			// Mark all forks as resumed
+			for (const fp of unresumed) {
+				fp.resumed = true;
+				pi.appendEntry(FORK_POINT_TYPE, fp);
+			}
+
+			await ctx.navigateTree(root.leafId);
+			updateForkStatus(ctx);
+
+			const prompt = root.prompt;
+			pi.sendUserMessage(`Continue the task you were working on before I interrupted you. The original request was:\n\n<original-request>\n${prompt}\n</original-request>\n\nPick up where you left off.`, { deliverAs: "followUp" });
+		},
+	});
+
+	// --- /b -------------------------------------------------------------
+
+	pi.registerCommand("b", {
+		description: "Fork the conversation. /b <message> to fork and send message",
 		handler: async (args, ctx) => {
-			
-			const trimmed = (args ?? "").trim().toLowerCase();
-			if (!trimmed) {
-				await runForkFromCommand(ctx);
-				return;
+			const trimmed = (args ?? "").trim();
+
+			// Fork the conversation (navigateTree for clean branch)
+			await runForkFromCommand(ctx);
+
+			// If the user typed text after /s, send it as their first
+			// message on the new branch
+			if (trimmed) {
+				pi.sendUserMessage(trimmed);
 			}
-			if (trimmed === "ls" || trimmed === "list") {
-				if (forkStack.length === 0) {
-					ctx.ui.notify("No fork points recorded.", "info");
-					return;
-				}
-				const now = Date.now();
-				const lines = forkStack.map((fp, i) => {
-					const age = fmtAge(now - fp.forkTimestamp);
-					const status = fp.resumed ? "resumed" : "active";
-					const promptPreview = fp.prompt.length > 50 ? `${fp.prompt.slice(0, 50)}…` : fp.prompt;
-					return `${String(i + 1).padStart(2)}. ${fp.id}  ${age.padStart(5)}  ${status.padEnd(8)}  ${promptPreview}`;
-				});
-				pi.sendMessage({
-					customType: "bg-fork-list",
-					content: ["Fork points:", ...lines].join("\n"),
-					display: true,
-				});
-				return;
-			}
-			ctx.ui.notify("Usage: /sqrl (to fork now) or /sqrl ls (to list fork points)", "warning");
 		},
 	});
 

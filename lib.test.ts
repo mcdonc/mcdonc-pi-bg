@@ -12,9 +12,7 @@ import {
 	isPidAlive,
 	shellQuote,
 	buildWrapperCommand,
-	searchBranches,
 } from "./lib.ts";
-import type { BranchCandidate } from "./lib.ts";
 
 // ── shortId ──────────────────────────────────────────────────────────────
 
@@ -401,62 +399,6 @@ describe("wrapper.ts", () => {
 		}
 		await sleep(500);
 		assert.ok(!isPidAlive(innerPid), "inner process should be dead after cleanup");
-	});
-});
-
-// ── searchBranches ──────────────────────────────────────────────────────
-
-describe("searchBranches", () => {
-	const branches: BranchCandidate[] = [
-		{ leafId: "a1", text: "refactor the auth module for better security", preview: "refactor auth..." },
-		{ leafId: "b2", text: "check CI results and fix failing tests", preview: "check CI..." },
-		{ leafId: "c3", text: "deploy the new API to production", preview: "deploy API..." },
-	];
-
-	it("returns matches sorted by score descending", () => {
-		const results = searchBranches("auth refactor", branches);
-		assert.equal(results.length, 1);
-		assert.equal(results[0]!.leafId, "a1");
-		assert.equal(results[0]!.score, 2);
-	});
-
-	it("returns empty array for empty query", () => {
-		assert.deepEqual(searchBranches("", branches), []);
-		assert.deepEqual(searchBranches("   ", branches), []);
-	});
-
-	it("returns empty array when no matches", () => {
-		assert.deepEqual(searchBranches("kubernetes helm", branches), []);
-	});
-
-	it("multiple keywords boost score", () => {
-		const results = searchBranches("CI failing tests", branches);
-		assert.equal(results.length, 1);
-		assert.equal(results[0]!.leafId, "b2");
-		assert.equal(results[0]!.score, 3);
-	});
-
-	it("is case-insensitive", () => {
-		const results = searchBranches("DEPLOY API", branches);
-		assert.equal(results.length, 1);
-		assert.equal(results[0]!.leafId, "c3");
-	});
-
-	it("strips punctuation from query", () => {
-		const results = searchBranches("auth's module!", branches);
-		assert.ok(results.length > 0);
-		assert.equal(results[0]!.leafId, "a1");
-	});
-
-	it("ranks higher-scoring branches first", () => {
-		const similar: BranchCandidate[] = [
-			{ leafId: "x1", text: "the deploy script runs on the server", preview: "deploy script..." },
-			{ leafId: "x2", text: "deploy the new API to production server and configure routing", preview: "deploy API prod..." },
-		];
-		const results = searchBranches("deploy server API", similar);
-		assert.equal(results.length, 2);
-		assert.equal(results[0]!.leafId, "x2");
-		assert.ok(results[0]!.score > results[1]!.score);
 	});
 });
 

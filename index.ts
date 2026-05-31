@@ -314,7 +314,7 @@ export default function (pi: ExtensionAPI) {
 		pi.appendEntry(FORK_POINT_TYPE, fp);
 
 		updateForkStatus(ctx);
-		ctx.ui.notify(`Forked conversation (${fp.id}). /bb when ready to continue.`, "warning");
+		ctx.ui.notify(`Forked conversation (${fp.id}). /bb when ready to return to the parent.`, "warning");
 	};
 
 	// --- /bg ---------------------------------------------------------------

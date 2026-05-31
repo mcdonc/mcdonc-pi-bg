@@ -66,6 +66,48 @@ export function isPidAlive(pid: number): boolean {
 	}
 }
 
+// ── Branch search for /resume ───────────────────────────────────────────
+
+export interface BranchCandidate {
+	leafId: string;
+	text: string;        // concatenated text content from the branch
+	preview: string;     // short preview for display
+}
+
+export interface ScoredBranch {
+	leafId: string;
+	preview: string;
+	score: number;
+}
+
+/**
+ * Keyword-based branch search. Tokenizes the query, scores each branch by
+ * how many query keywords appear in its text, returns matches sorted by
+ * score descending.
+ */
+export function searchBranches(query: string, branches: BranchCandidate[]): ScoredBranch[] {
+	const keywords = query
+		.toLowerCase()
+		.replace(/[^\w\s]/g, "")
+		.split(/\s+/)
+		.filter(Boolean);
+	if (keywords.length === 0) return [];
+
+	const scored: ScoredBranch[] = [];
+	for (const b of branches) {
+		const lower = b.text.toLowerCase();
+		let score = 0;
+		for (const kw of keywords) {
+			if (lower.includes(kw)) score++;
+		}
+		if (score > 0) {
+			scored.push({ leafId: b.leafId, preview: b.preview, score });
+		}
+	}
+	scored.sort((a, b) => b.score - a.score);
+	return scored;
+}
+
 export function shellQuote(s: string): string {
 	return "'" + s.replace(/'/g, "'\\''") + "'";
 }
